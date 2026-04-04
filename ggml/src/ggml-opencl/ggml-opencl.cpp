@@ -1116,374 +1116,6 @@ static bool ggml_opencl_legacy_same_shape_elementwise(const ggml_tensor * op) {
     return s0 && s1 && ggml_are_same_shape(s0, s1) && ggml_are_same_shape(s0, op);
 }
 
-static void ggml_cl_legacy_diag_mask_inf(ggml_backend_t backend, const ggml_tensor * src0, const ggml_tensor * src1, ggml_tensor * dst) {
-    GGML_ASSERT(src0 && src0->extra && dst && dst->extra);
-    UNUSED(src1);
-
-    const int32_t n_past = ((const int32_t *)(dst->op_params))[0];
-    const int ne00 = src0->ne[0];
-    const int ne01 = src0->ne[1];
-    const int ne02 = src0->ne[2];
-
-    ggml_backend_opencl_context * backend_ctx = (ggml_backend_opencl_context *) backend->context;
-    ggml_tensor_extra_cl * extra0 = (ggml_tensor_extra_cl *) src0->extra;
-    ggml_tensor_extra_cl * extrad = (ggml_tensor_extra_cl *) dst->extra;
-    const cl_ulong offset0 = extra0->offset + src0->view_offs;
-    const cl_ulong offsetd = extrad->offset + dst->view_offs;
-
-    cl_kernel kernel = backend_ctx->kernel_legacy_diag_mask_inf_f32;
-    CL_CHECK(clSetKernelArg(kernel, 0, sizeof(cl_mem),   &extra0->data_device));
-    CL_CHECK(clSetKernelArg(kernel, 1, sizeof(cl_ulong), &offset0));
-    CL_CHECK(clSetKernelArg(kernel, 2, sizeof(cl_mem),   &extrad->data_device));
-    CL_CHECK(clSetKernelArg(kernel, 3, sizeof(cl_ulong), &offsetd));
-    CL_CHECK(clSetKernelArg(kernel, 4, sizeof(int),      &ne00));
-    CL_CHECK(clSetKernelArg(kernel, 5, sizeof(int),      &ne01));
-    CL_CHECK(clSetKernelArg(kernel, 6, sizeof(int),      &n_past));
-
-    size_t global_work_size[] = { (size_t) ne00, (size_t) ne01, (size_t) ne02 };
-    backend_ctx->enqueue_ndrange_kernel(kernel, 3, global_work_size, nullptr, dst);
-}
-
-static void ggml_cl_legacy_rms_norm(ggml_backend_t backend, const ggml_tensor * src0, const ggml_tensor * src1, ggml_tensor * dst) {
-    GGML_ASSERT(src0 && src0->extra && dst && dst->extra);
-    UNUSED(src1);
-
-    float eps;
-    memcpy(&eps, dst->op_params, sizeof(float));
-
-    const int ne00 = src0->ne[0];
-    const int ne01 = src0->ne[1];
-    const int ne02 = src0->ne[2];
-    const int ne03 = src0->ne[3];
-    const cl_ulong nb01 = src0->nb[1];
-    const cl_ulong nb02 = src0->nb[2];
-    const cl_ulong nb03 = src0->nb[3];
-
-    ggml_backend_opencl_context * backend_ctx = (ggml_backend_opencl_context *) backend->context;
-    ggml_tensor_extra_cl * extra0 = (ggml_tensor_extra_cl *) src0->extra;
-    ggml_tensor_extra_cl * extrad = (ggml_tensor_extra_cl *) dst->extra;
-    const cl_ulong offset0 = extra0->offset + src0->view_offs;
-    const cl_ulong offsetd = extrad->offset + dst->view_offs;
-
-    cl_kernel kernel = backend_ctx->kernel_legacy_rms_norm_f32;
-    CL_CHECK(clSetKernelArg(kernel,  0, sizeof(cl_mem),    &extra0->data_device));
-    CL_CHECK(clSetKernelArg(kernel,  1, sizeof(cl_ulong),  &offset0));
-    CL_CHECK(clSetKernelArg(kernel,  2, sizeof(cl_mem),    &extrad->data_device));
-    CL_CHECK(clSetKernelArg(kernel,  3, sizeof(cl_ulong),  &offsetd));
-    CL_CHECK(clSetKernelArg(kernel,  4, sizeof(int),       &ne00));
-    CL_CHECK(clSetKernelArg(kernel,  5, sizeof(int),       &ne01));
-    CL_CHECK(clSetKernelArg(kernel,  6, sizeof(int),       &ne02));
-    CL_CHECK(clSetKernelArg(kernel,  7, sizeof(int),       &ne03));
-    CL_CHECK(clSetKernelArg(kernel,  8, sizeof(cl_ulong),  &nb01));
-    CL_CHECK(clSetKernelArg(kernel,  9, sizeof(cl_ulong),  &nb02));
-    CL_CHECK(clSetKernelArg(kernel, 10, sizeof(cl_ulong),  &nb03));
-    CL_CHECK(clSetKernelArg(kernel, 11, sizeof(float),     &eps));
-
-    size_t global_work_size[] = { (size_t) ne01, (size_t) ne02, (size_t) ne03 };
-    backend_ctx->enqueue_ndrange_kernel(kernel, 3, global_work_size, nullptr, dst);
-}
-
-static void ggml_cl_legacy_add(ggml_backend_t backend, const ggml_tensor * src0, const ggml_tensor * src1, ggml_tensor * dst) {
-    GGML_ASSERT(src0 && src0->extra && src1 && src1->extra && dst && dst->extra);
-    const int n = (int) ggml_nelements(dst);
-    ggml_backend_opencl_context * backend_ctx = (ggml_backend_opencl_context *) backend->context;
-    ggml_tensor_extra_cl * e0 = (ggml_tensor_extra_cl *) src0->extra;
-    ggml_tensor_extra_cl * e1 = (ggml_tensor_extra_cl *) src1->extra;
-    ggml_tensor_extra_cl * ed = (ggml_tensor_extra_cl *) dst->extra;
-    const cl_ulong o0 = e0->offset + src0->view_offs;
-    const cl_ulong o1 = e1->offset + src1->view_offs;
-    const cl_ulong od = ed->offset + dst->view_offs;
-    cl_kernel k = backend_ctx->kernel_legacy_add_f32;
-    CL_CHECK(clSetKernelArg(k, 0, sizeof(cl_mem),   &e0->data_device));
-    CL_CHECK(clSetKernelArg(k, 1, sizeof(cl_ulong), &o0));
-    CL_CHECK(clSetKernelArg(k, 2, sizeof(cl_mem),   &e1->data_device));
-    CL_CHECK(clSetKernelArg(k, 3, sizeof(cl_ulong), &o1));
-    CL_CHECK(clSetKernelArg(k, 4, sizeof(cl_mem),   &ed->data_device));
-    CL_CHECK(clSetKernelArg(k, 5, sizeof(cl_ulong), &od));
-    CL_CHECK(clSetKernelArg(k, 6, sizeof(int),      &n));
-    size_t gws[] = { (size_t) n };
-    backend_ctx->enqueue_ndrange_kernel(k, 1, gws, nullptr, dst);
-}
-
-static void ggml_cl_legacy_mul(ggml_backend_t backend, const ggml_tensor * src0, const ggml_tensor * src1, ggml_tensor * dst) {
-    GGML_ASSERT(src0 && src0->extra && src1 && src1->extra && dst && dst->extra);
-    const int n = (int) ggml_nelements(dst);
-    ggml_backend_opencl_context * backend_ctx = (ggml_backend_opencl_context *) backend->context;
-    ggml_tensor_extra_cl * e0 = (ggml_tensor_extra_cl *) src0->extra;
-    ggml_tensor_extra_cl * e1 = (ggml_tensor_extra_cl *) src1->extra;
-    ggml_tensor_extra_cl * ed = (ggml_tensor_extra_cl *) dst->extra;
-    const cl_ulong o0 = e0->offset + src0->view_offs;
-    const cl_ulong o1 = e1->offset + src1->view_offs;
-    const cl_ulong od = ed->offset + dst->view_offs;
-    cl_kernel k = backend_ctx->kernel_legacy_mul_f32;
-    CL_CHECK(clSetKernelArg(k, 0, sizeof(cl_mem),   &e0->data_device));
-    CL_CHECK(clSetKernelArg(k, 1, sizeof(cl_ulong), &o0));
-    CL_CHECK(clSetKernelArg(k, 2, sizeof(cl_mem),   &e1->data_device));
-    CL_CHECK(clSetKernelArg(k, 3, sizeof(cl_ulong), &o1));
-    CL_CHECK(clSetKernelArg(k, 4, sizeof(cl_mem),   &ed->data_device));
-    CL_CHECK(clSetKernelArg(k, 5, sizeof(cl_ulong), &od));
-    CL_CHECK(clSetKernelArg(k, 6, sizeof(int),      &n));
-    size_t gws[] = { (size_t) n };
-    backend_ctx->enqueue_ndrange_kernel(k, 1, gws, nullptr, dst);
-}
-
-static void ggml_cl_legacy_scale(ggml_backend_t backend, const ggml_tensor * src0, const ggml_tensor * src1, ggml_tensor * dst) {
-    GGML_ASSERT(src0 && src0->extra && dst && dst->extra);
-    UNUSED(src1);
-    float scale;
-    float bias;
-    memcpy(&scale, ((const int32_t *) dst->op_params) + 0, sizeof(float));
-    memcpy(&bias,  ((const int32_t *) dst->op_params) + 1, sizeof(float));
-    const int n = (int) ggml_nelements(dst);
-    ggml_backend_opencl_context * backend_ctx = (ggml_backend_opencl_context *) backend->context;
-    ggml_tensor_extra_cl * e0 = (ggml_tensor_extra_cl *) src0->extra;
-    ggml_tensor_extra_cl * ed = (ggml_tensor_extra_cl *) dst->extra;
-    const cl_ulong o0 = e0->offset + src0->view_offs;
-    const cl_ulong od = ed->offset + dst->view_offs;
-    cl_kernel k = backend_ctx->kernel_legacy_scale_f32;
-    CL_CHECK(clSetKernelArg(k, 0, sizeof(cl_mem),   &e0->data_device));
-    CL_CHECK(clSetKernelArg(k, 1, sizeof(cl_ulong), &o0));
-    CL_CHECK(clSetKernelArg(k, 2, sizeof(cl_mem),   &ed->data_device));
-    CL_CHECK(clSetKernelArg(k, 3, sizeof(cl_ulong), &od));
-    CL_CHECK(clSetKernelArg(k, 4, sizeof(int),      &n));
-    CL_CHECK(clSetKernelArg(k, 5, sizeof(float),    &scale));
-    CL_CHECK(clSetKernelArg(k, 6, sizeof(float),    &bias));
-    size_t gws[] = { (size_t) n };
-    backend_ctx->enqueue_ndrange_kernel(k, 1, gws, nullptr, dst);
-}
-
-static void ggml_cl_legacy_cpy_f32(ggml_backend_t backend, const ggml_tensor * src0, const ggml_tensor * src1, ggml_tensor * dst) {
-    GGML_ASSERT(src0 && src0->extra && dst && dst->extra);
-    UNUSED(src1);
-    const int n = (int) ggml_nelements(dst);
-    ggml_backend_opencl_context * backend_ctx = (ggml_backend_opencl_context *) backend->context;
-    ggml_tensor_extra_cl * e0 = (ggml_tensor_extra_cl *) src0->extra;
-    ggml_tensor_extra_cl * ed = (ggml_tensor_extra_cl *) dst->extra;
-    const cl_ulong o0 = e0->offset + src0->view_offs;
-    const cl_ulong od = ed->offset + dst->view_offs;
-    cl_kernel k = backend_ctx->kernel_legacy_cpy_f32;
-    CL_CHECK(clSetKernelArg(k, 0, sizeof(cl_mem),   &e0->data_device));
-    CL_CHECK(clSetKernelArg(k, 1, sizeof(cl_ulong), &o0));
-    CL_CHECK(clSetKernelArg(k, 2, sizeof(cl_mem),   &ed->data_device));
-    CL_CHECK(clSetKernelArg(k, 3, sizeof(cl_ulong), &od));
-    CL_CHECK(clSetKernelArg(k, 4, sizeof(int),      &n));
-    size_t gws[] = { (size_t) n };
-    backend_ctx->enqueue_ndrange_kernel(k, 1, gws, nullptr, dst);
-}
-
-static void ggml_cl_legacy_unary(ggml_backend_t backend, ggml_tensor * dst) {
-    const ggml_tensor * src0 = dst->src[0];
-    GGML_ASSERT(src0 && src0->extra && dst && dst->extra);
-    const int n = (int) ggml_nelements(dst);
-    ggml_backend_opencl_context * backend_ctx = (ggml_backend_opencl_context *) backend->context;
-    ggml_tensor_extra_cl * e0 = (ggml_tensor_extra_cl *) src0->extra;
-    ggml_tensor_extra_cl * ed = (ggml_tensor_extra_cl *) dst->extra;
-    cl_kernel k = nullptr;
-    switch (ggml_get_unary_op(dst)) {
-        case GGML_UNARY_OP_SILU: k = backend_ctx->kernel_legacy_silu_f32; break;
-        case GGML_UNARY_OP_GELU: k = backend_ctx->kernel_legacy_gelu_f32; break;
-        default: GGML_ASSERT(false && "legacy unary not implemented"); break;
-    }
-    const cl_ulong o0 = e0->offset + src0->view_offs;
-    const cl_ulong od = ed->offset + dst->view_offs;
-    CL_CHECK(clSetKernelArg(k, 0, sizeof(cl_mem),   &e0->data_device));
-    CL_CHECK(clSetKernelArg(k, 1, sizeof(cl_ulong), &o0));
-    CL_CHECK(clSetKernelArg(k, 2, sizeof(cl_mem),   &ed->data_device));
-    CL_CHECK(clSetKernelArg(k, 3, sizeof(cl_ulong), &od));
-    CL_CHECK(clSetKernelArg(k, 4, sizeof(int),      &n));
-    size_t gws[] = { (size_t) n };
-    backend_ctx->enqueue_ndrange_kernel(k, 1, gws, nullptr, dst);
-}
-
-static void ggml_cl_legacy_soft_max(ggml_backend_t backend, const ggml_tensor * src0, const ggml_tensor * src1, ggml_tensor * dst) {
-    GGML_ASSERT(src0 && src0->extra && dst && dst->extra);
-    if (src1) {
-        GGML_ASSERT(src1->extra);
-    }
-    const ggml_tensor * src2 = dst->src[2];
-    if (src2) {
-        GGML_ASSERT(src2->extra);
-    }
-
-    ggml_backend_opencl_context * backend_ctx = (ggml_backend_opencl_context *) backend->context;
-    ggml_tensor_extra_cl * extra0 = (ggml_tensor_extra_cl *) src0->extra;
-    ggml_tensor_extra_cl * extrad = (ggml_tensor_extra_cl *) dst->extra;
-    ggml_tensor_extra_cl * extra1 = src1 ? (ggml_tensor_extra_cl *) src1->extra : nullptr;
-    ggml_tensor_extra_cl * extra2 = src2 ? (ggml_tensor_extra_cl *) src2->extra : nullptr;
-
-    cl_ulong offset0 = extra0->offset + src0->view_offs;
-    cl_ulong offsetd = extrad->offset + dst->view_offs;
-    cl_ulong offset1 = extra1 ? extra1->offset + src1->view_offs : offset0;
-    cl_ulong offset2 = extra2 ? extra2->offset + src2->view_offs : offset0;
-
-    const int ne00 = src0->ne[0];
-    const int ne01 = src0->ne[1];
-    const int ne02 = src0->ne[2];
-    const int ne03 = src0->ne[3];
-    const cl_ulong nb01 = src0->nb[1];
-    const cl_ulong nb02 = src0->nb[2];
-    const cl_ulong nb03 = src0->nb[3];
-
-    const int ne12 = src1 ? src1->ne[2] : 0;
-    const int ne13 = src1 ? src1->ne[3] : 0;
-    const cl_ulong nb11 = src1 ? src1->nb[1] : 0;
-    const cl_ulong nb12 = src1 ? src1->nb[2] : 0;
-    const cl_ulong nb13 = src1 ? src1->nb[3] : 0;
-    const cl_ulong nb1  = dst->nb[1];
-    const cl_ulong nb2  = dst->nb[2];
-    const cl_ulong nb3  = dst->nb[3];
-
-    float scale;
-    float max_bias;
-    memcpy(&scale,    dst->op_params + 0, sizeof(float));
-    memcpy(&max_bias, dst->op_params + 1, sizeof(float));
-
-    const int n_head      = src0->ne[2];
-    const int n_head_log2 = 1u << (uint32_t) floorf(log2f((float) n_head));
-    const float m0 = powf(2.0f, -(max_bias       ) / n_head_log2);
-    const float m1 = powf(2.0f, -(max_bias / 2.0f) / n_head_log2);
-
-    const cl_int use_mask = src1 ? 1 : 0;
-    const cl_int use_past = src2 ? 1 : 0;
-
-    cl_kernel kernel = backend_ctx->kernel_legacy_softmax_f32;
-    CL_CHECK(clSetKernelArg(kernel,  0, sizeof(cl_mem),   &extra0->data_device));
-    CL_CHECK(clSetKernelArg(kernel,  1, sizeof(cl_ulong), &offset0));
-    CL_CHECK(clSetKernelArg(kernel,  2, sizeof(cl_mem),   extra1 ? &extra1->data_device : &extra0->data_device));
-    CL_CHECK(clSetKernelArg(kernel,  3, sizeof(cl_ulong), &offset1));
-    CL_CHECK(clSetKernelArg(kernel,  4, sizeof(cl_int),   &use_mask));
-    CL_CHECK(clSetKernelArg(kernel,  5, sizeof(cl_mem),   extra2 ? &extra2->data_device : &extra0->data_device));
-    CL_CHECK(clSetKernelArg(kernel,  6, sizeof(cl_ulong), &offset2));
-    CL_CHECK(clSetKernelArg(kernel,  7, sizeof(cl_int),   &use_past));
-    CL_CHECK(clSetKernelArg(kernel,  8, sizeof(cl_mem),   &extrad->data_device));
-    CL_CHECK(clSetKernelArg(kernel,  9, sizeof(cl_ulong), &offsetd));
-    CL_CHECK(clSetKernelArg(kernel, 10, sizeof(int),      &ne00));
-    CL_CHECK(clSetKernelArg(kernel, 11, sizeof(cl_ulong), &nb01));
-    CL_CHECK(clSetKernelArg(kernel, 12, sizeof(cl_ulong), &nb02));
-    CL_CHECK(clSetKernelArg(kernel, 13, sizeof(cl_ulong), &nb03));
-    CL_CHECK(clSetKernelArg(kernel, 14, sizeof(int),      &ne12));
-    CL_CHECK(clSetKernelArg(kernel, 15, sizeof(int),      &ne13));
-    CL_CHECK(clSetKernelArg(kernel, 16, sizeof(cl_ulong), &nb11));
-    CL_CHECK(clSetKernelArg(kernel, 17, sizeof(cl_ulong), &nb12));
-    CL_CHECK(clSetKernelArg(kernel, 18, sizeof(cl_ulong), &nb13));
-    CL_CHECK(clSetKernelArg(kernel, 19, sizeof(cl_ulong), &nb1));
-    CL_CHECK(clSetKernelArg(kernel, 20, sizeof(cl_ulong), &nb2));
-    CL_CHECK(clSetKernelArg(kernel, 21, sizeof(cl_ulong), &nb3));
-    CL_CHECK(clSetKernelArg(kernel, 22, sizeof(float),    &scale));
-    CL_CHECK(clSetKernelArg(kernel, 23, sizeof(float),    &max_bias));
-    CL_CHECK(clSetKernelArg(kernel, 24, sizeof(float),    &m0));
-    CL_CHECK(clSetKernelArg(kernel, 25, sizeof(float),    &m1));
-    CL_CHECK(clSetKernelArg(kernel, 26, sizeof(int),      &n_head_log2));
-
-    size_t global_work_size[] = { (size_t) ne01, (size_t) ne02, (size_t) ne03 };
-    backend_ctx->enqueue_ndrange_kernel(kernel, 3, global_work_size, nullptr, dst);
-}
-
-static void ggml_cl_legacy_rope(ggml_backend_t backend, const ggml_tensor * src0, const ggml_tensor * src1, ggml_tensor * dst) {
-    GGML_ASSERT(src0 && src0->extra && src1 && src1->extra && dst && dst->extra);
-
-    ggml_backend_opencl_context * backend_ctx = (ggml_backend_opencl_context *) backend->context;
-    ggml_tensor_extra_cl * extra0 = (ggml_tensor_extra_cl *) src0->extra;
-    ggml_tensor_extra_cl * extra1 = (ggml_tensor_extra_cl *) src1->extra;
-    ggml_tensor_extra_cl * extrad = (ggml_tensor_extra_cl *) dst->extra;
-    ggml_tensor * src2 = dst->src[2];
-    ggml_tensor_extra_cl * extra2 = src2 ? (ggml_tensor_extra_cl *) src2->extra : nullptr;
-
-    cl_ulong offset0 = extra0->offset + src0->view_offs;
-    cl_ulong offset1 = extra1->offset + src1->view_offs;
-    cl_ulong offsetd = extrad->offset + dst->view_offs;
-    cl_ulong offset2 = extra2 ? extra2->offset + src2->view_offs : offset0;
-
-    const int ne00 = src0->ne[0];
-    const int ne01 = src0->ne[1];
-    const int ne02 = src0->ne[2];
-    const int ne03 = src0->ne[3];
-    const cl_ulong nb00 = src0->nb[0];
-    const cl_ulong nb01 = src0->nb[1];
-    const cl_ulong nb02 = src0->nb[2];
-    const cl_ulong nb03 = src0->nb[3];
-
-    const int ne0 = dst->ne[0];
-    const int ne1 = dst->ne[1];
-    const int ne2 = dst->ne[2];
-    const int ne3 = dst->ne[3];
-    const cl_ulong nb0 = dst->nb[0];
-    const cl_ulong nb1 = dst->nb[1];
-    const cl_ulong nb2 = dst->nb[2];
-    const cl_ulong nb3 = dst->nb[3];
-
-    GGML_ASSERT(src1->ne[0] % ne02 == 0);
-    GGML_ASSERT(src1->ne[0] >= ne02);
-
-    const int n_dims     = ((int *) dst->op_params)[1];
-    const int mode       = ((int *) dst->op_params)[2];
-    const int n_ctx_orig = ((int32_t *) dst->op_params)[4];
-
-    float freq_base;
-    float freq_scale;
-    float ext_factor;
-    float attn_factor;
-    float beta_fast;
-    float beta_slow;
-    memcpy(&freq_base,   (int32_t *) dst->op_params + 5, sizeof(float));
-    memcpy(&freq_scale,  (int32_t *) dst->op_params + 6, sizeof(float));
-    memcpy(&ext_factor,  (int32_t *) dst->op_params + 7, sizeof(float));
-    memcpy(&attn_factor, (int32_t *) dst->op_params + 8, sizeof(float));
-    memcpy(&beta_fast,   (int32_t *) dst->op_params + 9, sizeof(float));
-    memcpy(&beta_slow,   (int32_t *) dst->op_params + 10, sizeof(float));
-
-    float corr_dims[2];
-    ggml_rope_yarn_corr_dims(n_dims, n_ctx_orig, freq_base, beta_fast, beta_slow, corr_dims);
-
-    const cl_int use_src2 = src2 ? 1 : 0;
-    const cl_int is_neox  = (mode & GGML_ROPE_TYPE_NEOX) ? 1 : 0;
-
-    (void)ne1;
-    (void)ne2;
-    (void)ne3;
-
-    cl_kernel kernel = backend_ctx->kernel_legacy_rope_f32;
-    CL_CHECK(clSetKernelArg(kernel,  0, sizeof(cl_mem),   &extra0->data_device));
-    CL_CHECK(clSetKernelArg(kernel,  1, sizeof(cl_ulong), &offset0));
-    CL_CHECK(clSetKernelArg(kernel,  2, sizeof(cl_mem),   &extra1->data_device));
-    CL_CHECK(clSetKernelArg(kernel,  3, sizeof(cl_ulong), &offset1));
-    CL_CHECK(clSetKernelArg(kernel,  4, sizeof(cl_mem),   extra2 ? &extra2->data_device : &extra0->data_device));
-    CL_CHECK(clSetKernelArg(kernel,  5, sizeof(cl_ulong), &offset2));
-    CL_CHECK(clSetKernelArg(kernel,  6, sizeof(cl_int),   &use_src2));
-    CL_CHECK(clSetKernelArg(kernel,  7, sizeof(cl_mem),   &extrad->data_device));
-    CL_CHECK(clSetKernelArg(kernel,  8, sizeof(cl_ulong), &offsetd));
-    CL_CHECK(clSetKernelArg(kernel,  9, sizeof(int),      &ne00));
-    CL_CHECK(clSetKernelArg(kernel, 10, sizeof(int),      &ne01));
-    CL_CHECK(clSetKernelArg(kernel, 11, sizeof(int),      &ne02));
-    CL_CHECK(clSetKernelArg(kernel, 12, sizeof(int),      &ne03));
-    CL_CHECK(clSetKernelArg(kernel, 13, sizeof(cl_ulong), &nb00));
-    CL_CHECK(clSetKernelArg(kernel, 14, sizeof(cl_ulong), &nb01));
-    CL_CHECK(clSetKernelArg(kernel, 15, sizeof(cl_ulong), &nb02));
-    CL_CHECK(clSetKernelArg(kernel, 16, sizeof(cl_ulong), &nb03));
-    CL_CHECK(clSetKernelArg(kernel, 17, sizeof(int),      &ne0));
-    CL_CHECK(clSetKernelArg(kernel, 18, sizeof(int),      &ne1));
-    CL_CHECK(clSetKernelArg(kernel, 19, sizeof(int),      &ne2));
-    CL_CHECK(clSetKernelArg(kernel, 20, sizeof(int),      &ne3));
-    CL_CHECK(clSetKernelArg(kernel, 21, sizeof(cl_ulong), &nb0));
-    CL_CHECK(clSetKernelArg(kernel, 22, sizeof(cl_ulong), &nb1));
-    CL_CHECK(clSetKernelArg(kernel, 23, sizeof(cl_ulong), &nb2));
-    CL_CHECK(clSetKernelArg(kernel, 24, sizeof(cl_ulong), &nb3));
-    CL_CHECK(clSetKernelArg(kernel, 25, sizeof(int),      &n_dims));
-    CL_CHECK(clSetKernelArg(kernel, 26, sizeof(int),      &n_ctx_orig));
-    CL_CHECK(clSetKernelArg(kernel, 27, sizeof(float),    &freq_base));
-    CL_CHECK(clSetKernelArg(kernel, 28, sizeof(float),    &freq_scale));
-    CL_CHECK(clSetKernelArg(kernel, 29, sizeof(float),    &ext_factor));
-    CL_CHECK(clSetKernelArg(kernel, 30, sizeof(float),    &attn_factor));
-    CL_CHECK(clSetKernelArg(kernel, 31, sizeof(float),    &beta_fast));
-    CL_CHECK(clSetKernelArg(kernel, 32, sizeof(float),    &beta_slow));
-    CL_CHECK(clSetKernelArg(kernel, 33, sizeof(float),    &corr_dims[0]));
-    CL_CHECK(clSetKernelArg(kernel, 34, sizeof(float),    &corr_dims[1]));
-    CL_CHECK(clSetKernelArg(kernel, 35, sizeof(cl_int),   &is_neox));
-
-    size_t global_work_size[] = { (size_t) ne01, (size_t) ne02, (size_t) ne03 };
-    backend_ctx->enqueue_ndrange_kernel(kernel, 3, global_work_size, nullptr, dst);
-}
-
 #else
 static bool ggml_opencl_use_legacy_nvidia(const ggml_backend_opencl_context * backend_ctx) {
     GGML_UNUSED(backend_ctx);
@@ -4098,6 +3730,377 @@ struct ggml_tensor_extra_cl {
         actual_size = 0;
     }
 };
+
+#ifdef GGML_OPENCL_USE_CLBLAST
+// Legacy NVIDIA dispatch uses ggml_tensor_extra_cl; must follow struct definition (MSVC C2065 otherwise).
+static void ggml_cl_legacy_diag_mask_inf(ggml_backend_t backend, const ggml_tensor * src0, const ggml_tensor * src1, ggml_tensor * dst) {
+    GGML_ASSERT(src0 && src0->extra && dst && dst->extra);
+    UNUSED(src1);
+
+    const int32_t n_past = ((const int32_t *)(dst->op_params))[0];
+    const int ne00 = src0->ne[0];
+    const int ne01 = src0->ne[1];
+    const int ne02 = src0->ne[2];
+
+    ggml_backend_opencl_context * backend_ctx = (ggml_backend_opencl_context *) backend->context;
+    ggml_tensor_extra_cl * extra0 = (ggml_tensor_extra_cl *) src0->extra;
+    ggml_tensor_extra_cl * extrad = (ggml_tensor_extra_cl *) dst->extra;
+    const cl_ulong offset0 = extra0->offset + src0->view_offs;
+    const cl_ulong offsetd = extrad->offset + dst->view_offs;
+
+    cl_kernel kernel = backend_ctx->kernel_legacy_diag_mask_inf_f32;
+    CL_CHECK(clSetKernelArg(kernel, 0, sizeof(cl_mem),   &extra0->data_device));
+    CL_CHECK(clSetKernelArg(kernel, 1, sizeof(cl_ulong), &offset0));
+    CL_CHECK(clSetKernelArg(kernel, 2, sizeof(cl_mem),   &extrad->data_device));
+    CL_CHECK(clSetKernelArg(kernel, 3, sizeof(cl_ulong), &offsetd));
+    CL_CHECK(clSetKernelArg(kernel, 4, sizeof(int),      &ne00));
+    CL_CHECK(clSetKernelArg(kernel, 5, sizeof(int),      &ne01));
+    CL_CHECK(clSetKernelArg(kernel, 6, sizeof(int),      &n_past));
+
+    size_t global_work_size[] = { (size_t) ne00, (size_t) ne01, (size_t) ne02 };
+    backend_ctx->enqueue_ndrange_kernel(kernel, 3, global_work_size, nullptr, dst);
+}
+
+static void ggml_cl_legacy_rms_norm(ggml_backend_t backend, const ggml_tensor * src0, const ggml_tensor * src1, ggml_tensor * dst) {
+    GGML_ASSERT(src0 && src0->extra && dst && dst->extra);
+    UNUSED(src1);
+
+    float eps;
+    memcpy(&eps, dst->op_params, sizeof(float));
+
+    const int ne00 = src0->ne[0];
+    const int ne01 = src0->ne[1];
+    const int ne02 = src0->ne[2];
+    const int ne03 = src0->ne[3];
+    const cl_ulong nb01 = src0->nb[1];
+    const cl_ulong nb02 = src0->nb[2];
+    const cl_ulong nb03 = src0->nb[3];
+
+    ggml_backend_opencl_context * backend_ctx = (ggml_backend_opencl_context *) backend->context;
+    ggml_tensor_extra_cl * extra0 = (ggml_tensor_extra_cl *) src0->extra;
+    ggml_tensor_extra_cl * extrad = (ggml_tensor_extra_cl *) dst->extra;
+    const cl_ulong offset0 = extra0->offset + src0->view_offs;
+    const cl_ulong offsetd = extrad->offset + dst->view_offs;
+
+    cl_kernel kernel = backend_ctx->kernel_legacy_rms_norm_f32;
+    CL_CHECK(clSetKernelArg(kernel,  0, sizeof(cl_mem),    &extra0->data_device));
+    CL_CHECK(clSetKernelArg(kernel,  1, sizeof(cl_ulong),  &offset0));
+    CL_CHECK(clSetKernelArg(kernel,  2, sizeof(cl_mem),    &extrad->data_device));
+    CL_CHECK(clSetKernelArg(kernel,  3, sizeof(cl_ulong),  &offsetd));
+    CL_CHECK(clSetKernelArg(kernel,  4, sizeof(int),       &ne00));
+    CL_CHECK(clSetKernelArg(kernel,  5, sizeof(int),       &ne01));
+    CL_CHECK(clSetKernelArg(kernel,  6, sizeof(int),       &ne02));
+    CL_CHECK(clSetKernelArg(kernel,  7, sizeof(int),       &ne03));
+    CL_CHECK(clSetKernelArg(kernel,  8, sizeof(cl_ulong),  &nb01));
+    CL_CHECK(clSetKernelArg(kernel,  9, sizeof(cl_ulong),  &nb02));
+    CL_CHECK(clSetKernelArg(kernel, 10, sizeof(cl_ulong),  &nb03));
+    CL_CHECK(clSetKernelArg(kernel, 11, sizeof(float),     &eps));
+
+    size_t global_work_size[] = { (size_t) ne01, (size_t) ne02, (size_t) ne03 };
+    backend_ctx->enqueue_ndrange_kernel(kernel, 3, global_work_size, nullptr, dst);
+}
+
+static void ggml_cl_legacy_add(ggml_backend_t backend, const ggml_tensor * src0, const ggml_tensor * src1, ggml_tensor * dst) {
+    GGML_ASSERT(src0 && src0->extra && src1 && src1->extra && dst && dst->extra);
+    const int n = (int) ggml_nelements(dst);
+    ggml_backend_opencl_context * backend_ctx = (ggml_backend_opencl_context *) backend->context;
+    ggml_tensor_extra_cl * e0 = (ggml_tensor_extra_cl *) src0->extra;
+    ggml_tensor_extra_cl * e1 = (ggml_tensor_extra_cl *) src1->extra;
+    ggml_tensor_extra_cl * ed = (ggml_tensor_extra_cl *) dst->extra;
+    const cl_ulong o0 = e0->offset + src0->view_offs;
+    const cl_ulong o1 = e1->offset + src1->view_offs;
+    const cl_ulong od = ed->offset + dst->view_offs;
+    cl_kernel k = backend_ctx->kernel_legacy_add_f32;
+    CL_CHECK(clSetKernelArg(k, 0, sizeof(cl_mem),   &e0->data_device));
+    CL_CHECK(clSetKernelArg(k, 1, sizeof(cl_ulong), &o0));
+    CL_CHECK(clSetKernelArg(k, 2, sizeof(cl_mem),   &e1->data_device));
+    CL_CHECK(clSetKernelArg(k, 3, sizeof(cl_ulong), &o1));
+    CL_CHECK(clSetKernelArg(k, 4, sizeof(cl_mem),   &ed->data_device));
+    CL_CHECK(clSetKernelArg(k, 5, sizeof(cl_ulong), &od));
+    CL_CHECK(clSetKernelArg(k, 6, sizeof(int),      &n));
+    size_t gws[] = { (size_t) n };
+    backend_ctx->enqueue_ndrange_kernel(k, 1, gws, nullptr, dst);
+}
+
+static void ggml_cl_legacy_mul(ggml_backend_t backend, const ggml_tensor * src0, const ggml_tensor * src1, ggml_tensor * dst) {
+    GGML_ASSERT(src0 && src0->extra && src1 && src1->extra && dst && dst->extra);
+    const int n = (int) ggml_nelements(dst);
+    ggml_backend_opencl_context * backend_ctx = (ggml_backend_opencl_context *) backend->context;
+    ggml_tensor_extra_cl * e0 = (ggml_tensor_extra_cl *) src0->extra;
+    ggml_tensor_extra_cl * e1 = (ggml_tensor_extra_cl *) src1->extra;
+    ggml_tensor_extra_cl * ed = (ggml_tensor_extra_cl *) dst->extra;
+    const cl_ulong o0 = e0->offset + src0->view_offs;
+    const cl_ulong o1 = e1->offset + src1->view_offs;
+    const cl_ulong od = ed->offset + dst->view_offs;
+    cl_kernel k = backend_ctx->kernel_legacy_mul_f32;
+    CL_CHECK(clSetKernelArg(k, 0, sizeof(cl_mem),   &e0->data_device));
+    CL_CHECK(clSetKernelArg(k, 1, sizeof(cl_ulong), &o0));
+    CL_CHECK(clSetKernelArg(k, 2, sizeof(cl_mem),   &e1->data_device));
+    CL_CHECK(clSetKernelArg(k, 3, sizeof(cl_ulong), &o1));
+    CL_CHECK(clSetKernelArg(k, 4, sizeof(cl_mem),   &ed->data_device));
+    CL_CHECK(clSetKernelArg(k, 5, sizeof(cl_ulong), &od));
+    CL_CHECK(clSetKernelArg(k, 6, sizeof(int),      &n));
+    size_t gws[] = { (size_t) n };
+    backend_ctx->enqueue_ndrange_kernel(k, 1, gws, nullptr, dst);
+}
+
+static void ggml_cl_legacy_scale(ggml_backend_t backend, const ggml_tensor * src0, const ggml_tensor * src1, ggml_tensor * dst) {
+    GGML_ASSERT(src0 && src0->extra && dst && dst->extra);
+    UNUSED(src1);
+    float scale;
+    float bias;
+    memcpy(&scale, ((const int32_t *) dst->op_params) + 0, sizeof(float));
+    memcpy(&bias,  ((const int32_t *) dst->op_params) + 1, sizeof(float));
+    const int n = (int) ggml_nelements(dst);
+    ggml_backend_opencl_context * backend_ctx = (ggml_backend_opencl_context *) backend->context;
+    ggml_tensor_extra_cl * e0 = (ggml_tensor_extra_cl *) src0->extra;
+    ggml_tensor_extra_cl * ed = (ggml_tensor_extra_cl *) dst->extra;
+    const cl_ulong o0 = e0->offset + src0->view_offs;
+    const cl_ulong od = ed->offset + dst->view_offs;
+    cl_kernel k = backend_ctx->kernel_legacy_scale_f32;
+    CL_CHECK(clSetKernelArg(k, 0, sizeof(cl_mem),   &e0->data_device));
+    CL_CHECK(clSetKernelArg(k, 1, sizeof(cl_ulong), &o0));
+    CL_CHECK(clSetKernelArg(k, 2, sizeof(cl_mem),   &ed->data_device));
+    CL_CHECK(clSetKernelArg(k, 3, sizeof(cl_ulong), &od));
+    CL_CHECK(clSetKernelArg(k, 4, sizeof(int),      &n));
+    CL_CHECK(clSetKernelArg(k, 5, sizeof(float),    &scale));
+    CL_CHECK(clSetKernelArg(k, 6, sizeof(float),    &bias));
+    size_t gws[] = { (size_t) n };
+    backend_ctx->enqueue_ndrange_kernel(k, 1, gws, nullptr, dst);
+}
+
+static void ggml_cl_legacy_cpy_f32(ggml_backend_t backend, const ggml_tensor * src0, const ggml_tensor * src1, ggml_tensor * dst) {
+    GGML_ASSERT(src0 && src0->extra && dst && dst->extra);
+    UNUSED(src1);
+    const int n = (int) ggml_nelements(dst);
+    ggml_backend_opencl_context * backend_ctx = (ggml_backend_opencl_context *) backend->context;
+    ggml_tensor_extra_cl * e0 = (ggml_tensor_extra_cl *) src0->extra;
+    ggml_tensor_extra_cl * ed = (ggml_tensor_extra_cl *) dst->extra;
+    const cl_ulong o0 = e0->offset + src0->view_offs;
+    const cl_ulong od = ed->offset + dst->view_offs;
+    cl_kernel k = backend_ctx->kernel_legacy_cpy_f32;
+    CL_CHECK(clSetKernelArg(k, 0, sizeof(cl_mem),   &e0->data_device));
+    CL_CHECK(clSetKernelArg(k, 1, sizeof(cl_ulong), &o0));
+    CL_CHECK(clSetKernelArg(k, 2, sizeof(cl_mem),   &ed->data_device));
+    CL_CHECK(clSetKernelArg(k, 3, sizeof(cl_ulong), &od));
+    CL_CHECK(clSetKernelArg(k, 4, sizeof(int),      &n));
+    size_t gws[] = { (size_t) n };
+    backend_ctx->enqueue_ndrange_kernel(k, 1, gws, nullptr, dst);
+}
+
+static void ggml_cl_legacy_unary(ggml_backend_t backend, ggml_tensor * dst) {
+    const ggml_tensor * src0 = dst->src[0];
+    GGML_ASSERT(src0 && src0->extra && dst && dst->extra);
+    const int n = (int) ggml_nelements(dst);
+    ggml_backend_opencl_context * backend_ctx = (ggml_backend_opencl_context *) backend->context;
+    ggml_tensor_extra_cl * e0 = (ggml_tensor_extra_cl *) src0->extra;
+    ggml_tensor_extra_cl * ed = (ggml_tensor_extra_cl *) dst->extra;
+    cl_kernel k = nullptr;
+    switch (ggml_get_unary_op(dst)) {
+        case GGML_UNARY_OP_SILU: k = backend_ctx->kernel_legacy_silu_f32; break;
+        case GGML_UNARY_OP_GELU: k = backend_ctx->kernel_legacy_gelu_f32; break;
+        default: GGML_ASSERT(false && "legacy unary not implemented"); break;
+    }
+    const cl_ulong o0 = e0->offset + src0->view_offs;
+    const cl_ulong od = ed->offset + dst->view_offs;
+    CL_CHECK(clSetKernelArg(k, 0, sizeof(cl_mem),   &e0->data_device));
+    CL_CHECK(clSetKernelArg(k, 1, sizeof(cl_ulong), &o0));
+    CL_CHECK(clSetKernelArg(k, 2, sizeof(cl_mem),   &ed->data_device));
+    CL_CHECK(clSetKernelArg(k, 3, sizeof(cl_ulong), &od));
+    CL_CHECK(clSetKernelArg(k, 4, sizeof(int),      &n));
+    size_t gws[] = { (size_t) n };
+    backend_ctx->enqueue_ndrange_kernel(k, 1, gws, nullptr, dst);
+}
+
+static void ggml_cl_legacy_soft_max(ggml_backend_t backend, const ggml_tensor * src0, const ggml_tensor * src1, ggml_tensor * dst) {
+    GGML_ASSERT(src0 && src0->extra && dst && dst->extra);
+    if (src1) {
+        GGML_ASSERT(src1->extra);
+    }
+    const ggml_tensor * src2 = dst->src[2];
+    if (src2) {
+        GGML_ASSERT(src2->extra);
+    }
+
+    ggml_backend_opencl_context * backend_ctx = (ggml_backend_opencl_context *) backend->context;
+    ggml_tensor_extra_cl * extra0 = (ggml_tensor_extra_cl *) src0->extra;
+    ggml_tensor_extra_cl * extrad = (ggml_tensor_extra_cl *) dst->extra;
+    ggml_tensor_extra_cl * extra1 = src1 ? (ggml_tensor_extra_cl *) src1->extra : nullptr;
+    ggml_tensor_extra_cl * extra2 = src2 ? (ggml_tensor_extra_cl *) src2->extra : nullptr;
+
+    cl_ulong offset0 = extra0->offset + src0->view_offs;
+    cl_ulong offsetd = extrad->offset + dst->view_offs;
+    cl_ulong offset1 = extra1 ? extra1->offset + src1->view_offs : offset0;
+    cl_ulong offset2 = extra2 ? extra2->offset + src2->view_offs : offset0;
+
+    const int ne00 = src0->ne[0];
+    const int ne01 = src0->ne[1];
+    const int ne02 = src0->ne[2];
+    const int ne03 = src0->ne[3];
+    const cl_ulong nb01 = src0->nb[1];
+    const cl_ulong nb02 = src0->nb[2];
+    const cl_ulong nb03 = src0->nb[3];
+
+    const int ne12 = src1 ? src1->ne[2] : 0;
+    const int ne13 = src1 ? src1->ne[3] : 0;
+    const cl_ulong nb11 = src1 ? src1->nb[1] : 0;
+    const cl_ulong nb12 = src1 ? src1->nb[2] : 0;
+    const cl_ulong nb13 = src1 ? src1->nb[3] : 0;
+    const cl_ulong nb1  = dst->nb[1];
+    const cl_ulong nb2  = dst->nb[2];
+    const cl_ulong nb3  = dst->nb[3];
+
+    float scale;
+    float max_bias;
+    memcpy(&scale,    dst->op_params + 0, sizeof(float));
+    memcpy(&max_bias, dst->op_params + 1, sizeof(float));
+
+    const int n_head      = src0->ne[2];
+    const int n_head_log2 = 1u << (uint32_t) floorf(log2f((float) n_head));
+    const float m0 = powf(2.0f, -(max_bias       ) / n_head_log2);
+    const float m1 = powf(2.0f, -(max_bias / 2.0f) / n_head_log2);
+
+    const cl_int use_mask = src1 ? 1 : 0;
+    const cl_int use_past = src2 ? 1 : 0;
+
+    cl_kernel kernel = backend_ctx->kernel_legacy_softmax_f32;
+    CL_CHECK(clSetKernelArg(kernel,  0, sizeof(cl_mem),   &extra0->data_device));
+    CL_CHECK(clSetKernelArg(kernel,  1, sizeof(cl_ulong), &offset0));
+    CL_CHECK(clSetKernelArg(kernel,  2, sizeof(cl_mem),   extra1 ? &extra1->data_device : &extra0->data_device));
+    CL_CHECK(clSetKernelArg(kernel,  3, sizeof(cl_ulong), &offset1));
+    CL_CHECK(clSetKernelArg(kernel,  4, sizeof(cl_int),   &use_mask));
+    CL_CHECK(clSetKernelArg(kernel,  5, sizeof(cl_mem),   extra2 ? &extra2->data_device : &extra0->data_device));
+    CL_CHECK(clSetKernelArg(kernel,  6, sizeof(cl_ulong), &offset2));
+    CL_CHECK(clSetKernelArg(kernel,  7, sizeof(cl_int),   &use_past));
+    CL_CHECK(clSetKernelArg(kernel,  8, sizeof(cl_mem),   &extrad->data_device));
+    CL_CHECK(clSetKernelArg(kernel,  9, sizeof(cl_ulong), &offsetd));
+    CL_CHECK(clSetKernelArg(kernel, 10, sizeof(int),      &ne00));
+    CL_CHECK(clSetKernelArg(kernel, 11, sizeof(cl_ulong), &nb01));
+    CL_CHECK(clSetKernelArg(kernel, 12, sizeof(cl_ulong), &nb02));
+    CL_CHECK(clSetKernelArg(kernel, 13, sizeof(cl_ulong), &nb03));
+    CL_CHECK(clSetKernelArg(kernel, 14, sizeof(int),      &ne12));
+    CL_CHECK(clSetKernelArg(kernel, 15, sizeof(int),      &ne13));
+    CL_CHECK(clSetKernelArg(kernel, 16, sizeof(cl_ulong), &nb11));
+    CL_CHECK(clSetKernelArg(kernel, 17, sizeof(cl_ulong), &nb12));
+    CL_CHECK(clSetKernelArg(kernel, 18, sizeof(cl_ulong), &nb13));
+    CL_CHECK(clSetKernelArg(kernel, 19, sizeof(cl_ulong), &nb1));
+    CL_CHECK(clSetKernelArg(kernel, 20, sizeof(cl_ulong), &nb2));
+    CL_CHECK(clSetKernelArg(kernel, 21, sizeof(cl_ulong), &nb3));
+    CL_CHECK(clSetKernelArg(kernel, 22, sizeof(float),    &scale));
+    CL_CHECK(clSetKernelArg(kernel, 23, sizeof(float),    &max_bias));
+    CL_CHECK(clSetKernelArg(kernel, 24, sizeof(float),    &m0));
+    CL_CHECK(clSetKernelArg(kernel, 25, sizeof(float),    &m1));
+    CL_CHECK(clSetKernelArg(kernel, 26, sizeof(int),      &n_head_log2));
+
+    size_t global_work_size[] = { (size_t) ne01, (size_t) ne02, (size_t) ne03 };
+    backend_ctx->enqueue_ndrange_kernel(kernel, 3, global_work_size, nullptr, dst);
+}
+
+static void ggml_cl_legacy_rope(ggml_backend_t backend, const ggml_tensor * src0, const ggml_tensor * src1, ggml_tensor * dst) {
+    GGML_ASSERT(src0 && src0->extra && src1 && src1->extra && dst && dst->extra);
+
+    ggml_backend_opencl_context * backend_ctx = (ggml_backend_opencl_context *) backend->context;
+    ggml_tensor_extra_cl * extra0 = (ggml_tensor_extra_cl *) src0->extra;
+    ggml_tensor_extra_cl * extra1 = (ggml_tensor_extra_cl *) src1->extra;
+    ggml_tensor_extra_cl * extrad = (ggml_tensor_extra_cl *) dst->extra;
+    ggml_tensor * src2 = dst->src[2];
+    ggml_tensor_extra_cl * extra2 = src2 ? (ggml_tensor_extra_cl *) src2->extra : nullptr;
+
+    cl_ulong offset0 = extra0->offset + src0->view_offs;
+    cl_ulong offset1 = extra1->offset + src1->view_offs;
+    cl_ulong offsetd = extrad->offset + dst->view_offs;
+    cl_ulong offset2 = extra2 ? extra2->offset + src2->view_offs : offset0;
+
+    const int ne00 = src0->ne[0];
+    const int ne01 = src0->ne[1];
+    const int ne02 = src0->ne[2];
+    const int ne03 = src0->ne[3];
+    const cl_ulong nb00 = src0->nb[0];
+    const cl_ulong nb01 = src0->nb[1];
+    const cl_ulong nb02 = src0->nb[2];
+    const cl_ulong nb03 = src0->nb[3];
+
+    const int ne0 = dst->ne[0];
+    const int ne1 = dst->ne[1];
+    const int ne2 = dst->ne[2];
+    const int ne3 = dst->ne[3];
+    const cl_ulong nb0 = dst->nb[0];
+    const cl_ulong nb1 = dst->nb[1];
+    const cl_ulong nb2 = dst->nb[2];
+    const cl_ulong nb3 = dst->nb[3];
+
+    GGML_ASSERT(src1->ne[0] % ne02 == 0);
+    GGML_ASSERT(src1->ne[0] >= ne02);
+
+    const int n_dims     = ((int *) dst->op_params)[1];
+    const int mode       = ((int *) dst->op_params)[2];
+    const int n_ctx_orig = ((int32_t *) dst->op_params)[4];
+
+    float freq_base;
+    float freq_scale;
+    float ext_factor;
+    float attn_factor;
+    float beta_fast;
+    float beta_slow;
+    memcpy(&freq_base,   (int32_t *) dst->op_params + 5, sizeof(float));
+    memcpy(&freq_scale,  (int32_t *) dst->op_params + 6, sizeof(float));
+    memcpy(&ext_factor,  (int32_t *) dst->op_params + 7, sizeof(float));
+    memcpy(&attn_factor, (int32_t *) dst->op_params + 8, sizeof(float));
+    memcpy(&beta_fast,   (int32_t *) dst->op_params + 9, sizeof(float));
+    memcpy(&beta_slow,   (int32_t *) dst->op_params + 10, sizeof(float));
+
+    float corr_dims[2];
+    ggml_rope_yarn_corr_dims(n_dims, n_ctx_orig, freq_base, beta_fast, beta_slow, corr_dims);
+
+    const cl_int use_src2 = src2 ? 1 : 0;
+    const cl_int is_neox  = (mode & GGML_ROPE_TYPE_NEOX) ? 1 : 0;
+
+    (void)ne1;
+    (void)ne2;
+    (void)ne3;
+
+    cl_kernel kernel = backend_ctx->kernel_legacy_rope_f32;
+    CL_CHECK(clSetKernelArg(kernel,  0, sizeof(cl_mem),   &extra0->data_device));
+    CL_CHECK(clSetKernelArg(kernel,  1, sizeof(cl_ulong), &offset0));
+    CL_CHECK(clSetKernelArg(kernel,  2, sizeof(cl_mem),   &extra1->data_device));
+    CL_CHECK(clSetKernelArg(kernel,  3, sizeof(cl_ulong), &offset1));
+    CL_CHECK(clSetKernelArg(kernel,  4, sizeof(cl_mem),   extra2 ? &extra2->data_device : &extra0->data_device));
+    CL_CHECK(clSetKernelArg(kernel,  5, sizeof(cl_ulong), &offset2));
+    CL_CHECK(clSetKernelArg(kernel,  6, sizeof(cl_int),   &use_src2));
+    CL_CHECK(clSetKernelArg(kernel,  7, sizeof(cl_mem),   &extrad->data_device));
+    CL_CHECK(clSetKernelArg(kernel,  8, sizeof(cl_ulong), &offsetd));
+    CL_CHECK(clSetKernelArg(kernel,  9, sizeof(int),      &ne00));
+    CL_CHECK(clSetKernelArg(kernel, 10, sizeof(int),      &ne01));
+    CL_CHECK(clSetKernelArg(kernel, 11, sizeof(int),      &ne02));
+    CL_CHECK(clSetKernelArg(kernel, 12, sizeof(int),      &ne03));
+    CL_CHECK(clSetKernelArg(kernel, 13, sizeof(cl_ulong), &nb00));
+    CL_CHECK(clSetKernelArg(kernel, 14, sizeof(cl_ulong), &nb01));
+    CL_CHECK(clSetKernelArg(kernel, 15, sizeof(cl_ulong), &nb02));
+    CL_CHECK(clSetKernelArg(kernel, 16, sizeof(cl_ulong), &nb03));
+    CL_CHECK(clSetKernelArg(kernel, 17, sizeof(int),      &ne0));
+    CL_CHECK(clSetKernelArg(kernel, 18, sizeof(int),      &ne1));
+    CL_CHECK(clSetKernelArg(kernel, 19, sizeof(int),      &ne2));
+    CL_CHECK(clSetKernelArg(kernel, 20, sizeof(int),      &ne3));
+    CL_CHECK(clSetKernelArg(kernel, 21, sizeof(cl_ulong), &nb0));
+    CL_CHECK(clSetKernelArg(kernel, 22, sizeof(cl_ulong), &nb1));
+    CL_CHECK(clSetKernelArg(kernel, 23, sizeof(cl_ulong), &nb2));
+    CL_CHECK(clSetKernelArg(kernel, 24, sizeof(cl_ulong), &nb3));
+    CL_CHECK(clSetKernelArg(kernel, 25, sizeof(int),      &n_dims));
+    CL_CHECK(clSetKernelArg(kernel, 26, sizeof(int),      &n_ctx_orig));
+    CL_CHECK(clSetKernelArg(kernel, 27, sizeof(float),    &freq_base));
+    CL_CHECK(clSetKernelArg(kernel, 28, sizeof(float),    &freq_scale));
+    CL_CHECK(clSetKernelArg(kernel, 29, sizeof(float),    &ext_factor));
+    CL_CHECK(clSetKernelArg(kernel, 30, sizeof(float),    &attn_factor));
+    CL_CHECK(clSetKernelArg(kernel, 31, sizeof(float),    &beta_fast));
+    CL_CHECK(clSetKernelArg(kernel, 32, sizeof(float),    &beta_slow));
+    CL_CHECK(clSetKernelArg(kernel, 33, sizeof(float),    &corr_dims[0]));
+    CL_CHECK(clSetKernelArg(kernel, 34, sizeof(float),    &corr_dims[1]));
+    CL_CHECK(clSetKernelArg(kernel, 35, sizeof(cl_int),   &is_neox));
+
+    size_t global_work_size[] = { (size_t) ne01, (size_t) ne02, (size_t) ne03 };
+    backend_ctx->enqueue_ndrange_kernel(kernel, 3, global_work_size, nullptr, dst);
+}
+#endif // GGML_OPENCL_USE_CLBLAST
 
 // Additional tensor extra structs for quantized tensors.
 // These tensors are loaded from files and should not be allocated in scratch --
