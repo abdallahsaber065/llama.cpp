@@ -52,9 +52,29 @@ However, A6x GPUs in phones are likely not supported due to the outdated driver 
 
 This fork also includes a conservative compatibility path for older NVIDIA OpenCL stacks. It is intended for legacy GPUs such as Kepler-class mobile Quadro parts that cannot use the modern CUDA backend.
 
-This path does **not** try to run the full modern OpenCL kernel stack. Instead it keeps the modern `ggml-backend` integration, uses raw packed tensor buffers, offloads `MUL_MAT` through CLBlast, and leaves unsupported graph operations on the CPU scheduler fallback path.
+This path does **not** run the full upstream Adreno/subgroup OpenCL stack. It keeps the modern `ggml-backend` integration, uses raw packed tensor buffers, offloads `MUL_MAT` through CLBlast, and adds a small **OpenCL 1.2 / FP32 / subgroup-free** program (`legacy_core.cl`) for common transformer ops so more of the graph can stay on the GPU. Anything not listed below still falls back to the CPU backend via the scheduler.
 
-**CLBlast scope:** CLBlast provides BLAS-style routines (for example `GEMM`). It does not implement attention, RoPE, RMS norm, softmax, or other fused graph nodes. Running the **entire** model on GPU still requires those operations to have OpenCL implementations (or CPU fallback). This fork’s legacy path prioritizes correct `MUL_MAT` offload and safe CPU fallback elsewhere.
+**CLBlast scope:** CLBlast provides BLAS-style routines (for example `GEMM`). Custom kernels cover the non-BLAS ops below; other `GGML_OP` types remain unsupported on GPU until implemented.
+
+**Legacy core ops (FP32, contiguous where noted):**
+
+| Op | Notes |
+|----|--------|
+| `MUL_MAT` | CLBlast + dequant (existing path) |
+| `SET_ROWS` | Existing path; F16 only with `cl_khr_fp16` |
+| `RMS_NORM` | F32, contiguous |
+| `ROPE` | Normal / NeoX only; not MROPE, vision, or IMROPE |
+| `SOFT_MAX` | F32 activations; mask tensor must be F32 (no F16 mask) |
+| `DIAG_MASK_INF` | F32 |
+| `ADD`, `MUL` | Same-shape F32 |
+| `SCALE` | F32 |
+| `CPY` | F32→F32, same shape, contiguous |
+| `DUP`, `CONT` | F32, same shape as source, contiguous |
+| `UNARY` | `SILU`, `GELU` (tanh approximation) |
+
+**Device tags:** Legacy NVIDIA init appends `[fork_kepler_opencl]` to `ggml_backend_dev_description`. Without `cl_khr_fp16`, `[opencl_legacy_no_fp16]` is also appended; `llama_context` then uses F32 K/V and turns off Flash Attention so graphs use the decomposed attention + `SOFT_MAX` path.
+
+**Inventory:** Set `GGML_OPENCL_LEGACY_OP_INVENTORY=1` to log unsupported ops when the legacy backend declines a node (useful for model-by-model gap analysis).
 
 **Per-buffer limit:** Many drivers cap a single `cl_mem` allocation (`CL_DEVICE_MAX_MEM_ALLOC_SIZE`, often 1 GiB on older NVIDIA OpenCL). The legacy path dequantizes weights to FP32 for CLBlast; when `ne × sizeof(float)` would exceed a conservative budget derived from that cap, it dequantizes and multiplies **column slices** of `src0` (along `ne01`) instead of one giant buffer. If a tensor cannot be tiled under sub-buffer alignment and dequant kernel work-group constraints, `MUL_MAT` is left for the CPU backend.
 
@@ -67,10 +87,11 @@ Current focus of the compatibility path:
 | OpenCL 1.2 init path  | Support |
 | CLBlast GEMM backend  | Support |
 | `MUL_MAT` offload     | Support |
+| Legacy core F32 ops   | Partial (see table above) |
 | `MUL_MAT_ID` offload  | CPU fallback |
 | Subgroup kernels      | Disabled |
 
-The OpenCL backend reports `ggml_backend_dev_description` as `device name (OpenCL C version)`, matching the init log line. Fork logic (for example F16 KV-cache placement on OpenCL 1.2 without device FP16) relies on that string containing the OpenCL API level.
+The OpenCL backend reports `ggml_backend_dev_description` as `device name (OpenCL C version)`, matching the init log line, plus optional fork tags (see above). Older logic that keyed off `OpenCL 1.2` in the description for KV placement is bypassed when `[fork_kepler_opencl]` is present.
 
 ## DataType Supports
 

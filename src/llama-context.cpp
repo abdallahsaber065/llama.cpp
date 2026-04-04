@@ -272,6 +272,33 @@ llama_context::llama_context(
 
     // init the memory module
     if (!hparams.vocab_only) {
+        for (auto * dev : model.devices) {
+            if (strcmp(ggml_backend_dev_name(dev), "GPUOpenCL") != 0) {
+                continue;
+            }
+            const char * desc = ggml_backend_dev_description(dev);
+            if (!desc || strstr(desc, "[fork_kepler_opencl]") == nullptr) {
+                continue;
+            }
+            if (strstr(desc, "[opencl_legacy_no_fp16]") != nullptr) {
+                if (params.type_k == GGML_TYPE_F16) {
+                    LLAMA_LOG_WARN("%s: Kepler fork OpenCL without cl_khr_fp16: using F32 K cache for GPU placement\n", __func__);
+                    params.type_k = GGML_TYPE_F32;
+                }
+                if (params.type_v == GGML_TYPE_F16) {
+                    LLAMA_LOG_WARN("%s: Kepler fork OpenCL without cl_khr_fp16: using F32 V cache for GPU placement\n", __func__);
+                    params.type_v = GGML_TYPE_F32;
+                }
+            }
+            if (params.flash_attn_type != LLAMA_FLASH_ATTN_TYPE_DISABLED) {
+                LLAMA_LOG_WARN("%s: Kepler fork OpenCL legacy path: disabling Flash Attention (decomposed attention on GPU)\n", __func__);
+                params.flash_attn_type = LLAMA_FLASH_ATTN_TYPE_DISABLED;
+                cparams.flash_attn     = false;
+                cparams.auto_fa        = false;
+            }
+            break;
+        }
+
         llama_memory_params params_mem = {
             /*.type_k   =*/ params.type_k,
             /*.type_v   =*/ params.type_v,

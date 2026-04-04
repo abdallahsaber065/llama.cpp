@@ -194,6 +194,7 @@ set(GGML_OPENCL_KERNELS
     flash_attn_f32_f16
     flash_attn_f16
     flash_attn_f32
+    legacy_core
 )
 
 foreach (K ${GGML_OPENCL_KERNELS})

@@ -29,6 +29,11 @@ static bool llama_kv_cache_should_keep_on_cpu(ggml_backend_dev_t dev, ggml_type 
         return false;
     }
 
+    // Fork legacy NVIDIA path: KV can stay on GPU (F32 promotion and SET_ROWS handled in OpenCL backend).
+    if (strstr(dev_desc, "[fork_kepler_opencl]") != nullptr) {
+        return false;
+    }
+
     if (strstr(dev_desc, "OpenCL 1.2") == nullptr) {
         return false;
     }

@@ -7,7 +7,8 @@ This fork is intentionally narrowed to one GPU path:
 - modern `llama.cpp` frontend and GGUF support,
 - legacy NVIDIA / Kepler execution through OpenCL 1.2,
 - CLBlast-backed `MUL_MAT`,
-- CPU fallback for everything not explicitly validated.
+- a growing set of OpenCL 1.2 FP32 kernels (`legacy_core.cl`) for norms, RoPE, softmax, masks, and elementwise ops,
+- CPU fallback for everything not explicitly validated or outside the supported op matrix (see `docs/backend/OPENCL.md`).
 
 The goal is not to preserve upstream's broad backend matrix. The goal is to keep this fork buildable and maintainable for the Quadro `K3100M` class of hardware.
 
@@ -28,8 +29,9 @@ Runtime behavior changes:
 - subgroup-heavy modern OpenCL kernels are skipped in that path,
 - validated `MUL_MAT` workloads use CLBlast,
 - when a single FP32 dequant buffer would exceed `CL_DEVICE_MAX_MEM_ALLOC_SIZE`, `MUL_MAT` is split into column slices (still on GPU) instead of failing with OpenCL allocation errors,
-- unsupported ops stay on CPU through the scheduler fallback path.
-- KV cache for default F16 K/V may stay on CPU on OpenCL 1.2 devices without `cl_khr_fp16`; device selection uses `ggml_backend_dev_description`, which includes the OpenCL C version string.
+- unsupported ops stay on CPU through the scheduler fallback path (log gaps with `GGML_OPENCL_LEGACY_OP_INVENTORY=1`).
+- OpenCL devices in legacy mode report `[fork_kepler_opencl]` in `ggml_backend_dev_description`. Without `cl_khr_fp16`, `[opencl_legacy_no_fp16]` is added; `llama_context` promotes K/V to F32 and disables Flash Attention so attention uses the decomposed GPU path where supported.
+- KV cache is no longer forced to CPU solely for F16 on tagged fork devices (F32 K/V is used when the device has no FP16 extension).
 - Shared `cl_context` lifetime: the backend does **not** call `clReleaseContext` when the last `ggml_backend` is freed (default). The first probe creates one shared context for all enumerated devices; `ggml_cl2_init` returns a cached `backend_ctx`, so releasing the context during model load/teardown left stale handles and could trigger `CL_INVALID_CONTEXT` (-34) on legacy NVIDIA drivers. The context is released at process exit. Set `GGML_OPENCL_RELEASE_CONTEXT=1` only if you want explicit release in the same process (reload without restart may fail).
 
 ## Supported Build Path
