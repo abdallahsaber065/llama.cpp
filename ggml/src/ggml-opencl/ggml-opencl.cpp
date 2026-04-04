@@ -1021,6 +1021,11 @@ static void load_clblast_compat_kernels(ggml_backend_opencl_context * backend_ct
 
 static void load_cl_set_rows_kernels(ggml_backend_opencl_context * backend_ctx, const std::string & compile_opts) {
     cl_int err;
+    std::string set_rows_compile_opts = compile_opts;
+
+    if (backend_ctx->fp16_support) {
+        set_rows_compile_opts += " -DGGML_OPENCL_USE_FP16";
+    }
 
 #ifdef GGML_OPENCL_EMBED_KERNELS
     const std::string kernel_src {
@@ -1030,12 +1035,17 @@ static void load_cl_set_rows_kernels(ggml_backend_opencl_context * backend_ctx, 
     const std::string kernel_src = read_file("set_rows.cl");
 #endif
     backend_ctx->program_set_rows =
-        build_program_from_source(backend_ctx->context, backend_ctx->device, kernel_src.c_str(), compile_opts);
+        build_program_from_source(backend_ctx->context, backend_ctx->device, kernel_src.c_str(), set_rows_compile_opts);
 
     CL_CHECK((backend_ctx->kernel_set_rows_f32_i64 = clCreateKernel(backend_ctx->program_set_rows, "kernel_set_rows_f32_i64", &err), err));
     CL_CHECK((backend_ctx->kernel_set_rows_f32_i32 = clCreateKernel(backend_ctx->program_set_rows, "kernel_set_rows_f32_i32", &err), err));
-    CL_CHECK((backend_ctx->kernel_set_rows_f16_i64 = clCreateKernel(backend_ctx->program_set_rows, "kernel_set_rows_f16_i64", &err), err));
-    CL_CHECK((backend_ctx->kernel_set_rows_f16_i32 = clCreateKernel(backend_ctx->program_set_rows, "kernel_set_rows_f16_i32", &err), err));
+    if (backend_ctx->fp16_support) {
+        CL_CHECK((backend_ctx->kernel_set_rows_f16_i64 = clCreateKernel(backend_ctx->program_set_rows, "kernel_set_rows_f16_i64", &err), err));
+        CL_CHECK((backend_ctx->kernel_set_rows_f16_i32 = clCreateKernel(backend_ctx->program_set_rows, "kernel_set_rows_f16_i32", &err), err));
+    } else {
+        backend_ctx->kernel_set_rows_f16_i64 = nullptr;
+        backend_ctx->kernel_set_rows_f16_i32 = nullptr;
+    }
 }
 #else
 static bool ggml_opencl_use_legacy_nvidia(const ggml_backend_opencl_context * backend_ctx) {
@@ -4083,6 +4093,8 @@ static bool ggml_opencl_supports_op(ggml_backend_dev_t dev, const struct ggml_te
                 }
                 switch (op->type) {
                     case GGML_TYPE_F16:
+                        return backend_ctx->fp16_support &&
+                               (op->src[1]->type == GGML_TYPE_I64 || op->src[1]->type == GGML_TYPE_I32);
                     case GGML_TYPE_F32:
                         return op->src[1]->type == GGML_TYPE_I64 || op->src[1]->type == GGML_TYPE_I32;
                     default:

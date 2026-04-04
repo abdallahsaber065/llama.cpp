@@ -1,4 +1,6 @@
+#ifdef GGML_OPENCL_USE_FP16
 #pragma OPENCL EXTENSION cl_khr_fp16 : enable
+#endif
 
 // v = { mp, L, d }
 inline uint fastdiv(uint n, uint4 v) {
@@ -60,6 +62,7 @@ kernel void kernel_set_rows_f32_i64(
     }
 }
 
+#ifdef GGML_OPENCL_USE_FP16
 kernel void kernel_set_rows_f16_i64(
         global char * src0,
         ulong         offset0,
@@ -108,6 +111,7 @@ kernel void kernel_set_rows_f16_i64(
         dst_row[ind] = src_row[ind];
     }
 }
+#endif
 
 kernel void kernel_set_rows_f32_i32(
         global char * src0,
@@ -158,6 +162,7 @@ kernel void kernel_set_rows_f32_i32(
     }
 }
 
+#ifdef GGML_OPENCL_USE_FP16
 kernel void kernel_set_rows_f16_i32(
         global char * src0,
         ulong         offset0,
@@ -206,3 +211,4 @@ kernel void kernel_set_rows_f16_i32(
         dst_row[ind] = src_row[ind];
     }
 }
+#endif

@@ -17,6 +17,25 @@ static bool ggml_is_power_of_2(int n) {
     return (n & (n - 1)) == 0;
 }
 
+static bool llama_kv_cache_should_keep_on_cpu(ggml_backend_dev_t dev, ggml_type type_k, ggml_type type_v) {
+    if (dev == nullptr) {
+        return false;
+    }
+
+    const char * dev_name = ggml_backend_dev_name(dev);
+    const char * dev_desc = ggml_backend_dev_description(dev);
+
+    if (strcmp(dev_name, "GPUOpenCL") != 0) {
+        return false;
+    }
+
+    if (strstr(dev_desc, "OpenCL 1.2") == nullptr) {
+        return false;
+    }
+
+    return type_k == GGML_TYPE_F16 || type_v == GGML_TYPE_F16;
+}
+
 // orthonormal Walsh-Hadamard rotation matrix
 // note: res^2 == I
 static void ggml_gen_hadamard(ggml_tensor * tensor) {
@@ -158,6 +177,8 @@ llama_kv_cache::llama_kv_cache(
 
     const bool is_mla = hparams.is_mla();
 
+    bool warned_opencl_kv_cpu_fallback = false;
+
     for (uint32_t il = 0; il < hparams.n_layer; il++) {
         if (!hparams.has_kv(il)) {
             LLAMA_LOG_DEBUG("%s: layer %3d: does not have KV cache\n", __func__, il);
@@ -179,9 +200,16 @@ llama_kv_cache::llama_kv_cache(
 
         if (offload) {
             auto * dev = model.dev_layer(il);
-            buft = ggml_backend_dev_buffer_type(dev);
-
-            dev_name = ggml_backend_dev_name(dev);
+            if (llama_kv_cache_should_keep_on_cpu(dev, type_k, type_v)) {
+                if (!warned_opencl_kv_cpu_fallback) {
+                    LLAMA_LOG_WARN("%s: disabling KV cache offload for legacy OpenCL 1.2 F16 caches on %s; model layers can still use GPU offload\n",
+                            __func__, ggml_backend_dev_description(dev));
+                    warned_opencl_kv_cpu_fallback = true;
+                }
+            } else {
+                buft = ggml_backend_dev_buffer_type(dev);
+                dev_name = ggml_backend_dev_name(dev);
+            }
         }
 
         LLAMA_LOG_DEBUG("%s: layer %3d: dev = %s\n", __func__, il, dev_name);
