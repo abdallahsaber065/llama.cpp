@@ -1,5 +1,8 @@
 name: Fork Kepler OpenCL Build
 
+permissions:
+  contents: write
+
 on:
   workflow_dispatch:
   push:
@@ -142,3 +145,143 @@ jobs:
           name: fork-kepler-opencl-windows
           path: dist/windows
           if-no-files-found: error
+
+  publish-release:
+    name: Publish Release
+    runs-on: ubuntu-22.04
+    needs:
+      - linux-kepler-opencl
+      - windows-kepler-opencl
+    if: github.event_name == 'push' && github.ref == 'refs/heads/master'
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Download Linux artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: fork-kepler-opencl-linux
+          path: release-assets/linux
+
+      - name: Download Windows artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: fork-kepler-opencl-windows
+          path: release-assets/windows
+
+      - name: Determine release version
+        id: release_meta
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          RUN_NUMBER: ${{ github.run_number }}
+        run: |
+          python3 <<'PY'
+          import json
+          import os
+          import re
+          import subprocess
+          import urllib.request
+
+          changelog = open("CHANGELOG.md", "r", encoding="utf-8").read()
+          matches = re.findall(r"^##\s+(.+)$", changelog, flags=re.MULTILINE)
+
+          version = ""
+          for heading in matches:
+              heading = heading.strip()
+              if heading.lower() != "unreleased":
+                  version = heading
+                  break
+
+          output_path = os.environ["GITHUB_OUTPUT"]
+          with open(output_path, "a", encoding="utf-8") as fh:
+              if not version:
+                  fh.write("should_release=false\n")
+                  fh.write("reason=no_version_heading\n")
+                  raise SystemExit(0)
+
+              token = os.environ["GH_TOKEN"]
+              repo = os.environ["REPO"]
+              req = urllib.request.Request(
+                  f"https://api.github.com/repos/{repo}/releases",
+                  headers={
+                      "Authorization": f"Bearer {token}",
+                      "Accept": "application/vnd.github+json",
+                      "User-Agent": "cursor-workflow",
+                  },
+              )
+              with urllib.request.urlopen(req) as resp:
+                  releases = json.load(resp)
+
+              release_name = f"Version {version}"
+              if any(r.get("name") == release_name for r in releases):
+                  fh.write("should_release=false\n")
+                  fh.write("reason=version_already_released\n")
+                  fh.write(f"version={version}\n")
+                  raise SystemExit(0)
+
+              tag = f"build-{os.environ['RUN_NUMBER']}"
+              fh.write("should_release=true\n")
+              fh.write(f"version={version}\n")
+              fh.write(f"tag={tag}\n")
+              fh.write(f"release_name={release_name}\n")
+          PY
+
+      - name: Show release decision
+        run: |
+          echo "should_release=${{ steps.release_meta.outputs.should_release }}"
+          echo "reason=${{ steps.release_meta.outputs.reason }}"
+          echo "version=${{ steps.release_meta.outputs.version }}"
+          echo "tag=${{ steps.release_meta.outputs.tag }}"
+
+      - name: Package artifacts
+        if: steps.release_meta.outputs.should_release == 'true'
+        shell: bash
+        run: |
+          cd release-assets
+          zip -r "../fork-kepler-opencl-linux-${{ steps.release_meta.outputs.tag }}.zip" linux
+          zip -r "../fork-kepler-opencl-windows-${{ steps.release_meta.outputs.tag }}.zip" windows
+
+      - name: Extract release notes
+        if: steps.release_meta.outputs.should_release == 'true'
+        id: release_notes
+        shell: bash
+        run: |
+          python3 <<'PY'
+          import os
+          import re
+
+          text = open("CHANGELOG.md", "r", encoding="utf-8").read()
+          version = os.environ["VERSION"]
+          pattern = rf"^##\s+{re.escape(version)}\s*$([\s\S]*?)(?=^##\s+|\Z)"
+          match = re.search(pattern, text, flags=re.MULTILINE)
+          notes = match.group(1).strip() if match else ""
+
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as fh:
+              fh.write("body<<EOF\n")
+              fh.write(f"Automated release for {version}.\n\n")
+              if notes:
+                  fh.write(notes)
+                  fh.write("\n")
+              fh.write("\nArtifacts:\n")
+              fh.write(f"- Linux: fork-kepler-opencl-linux-{os.environ['TAG']}.zip\n")
+              fh.write(f"- Windows: fork-kepler-opencl-windows-{os.environ['TAG']}.zip\n")
+              fh.write("EOF\n")
+          PY
+        env:
+          VERSION: ${{ steps.release_meta.outputs.version }}
+          TAG: ${{ steps.release_meta.outputs.tag }}
+
+      - name: Create GitHub release
+        if: steps.release_meta.outputs.should_release == 'true'
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${{ steps.release_meta.outputs.tag }}" \
+            "fork-kepler-opencl-linux-${{ steps.release_meta.outputs.tag }}.zip" \
+            "fork-kepler-opencl-windows-${{ steps.release_meta.outputs.tag }}.zip" \
+            --target "${{ github.sha }}" \
+            --title "${{ steps.release_meta.outputs.release_name }}" \
+            --notes "${{ steps.release_notes.outputs.body }}"

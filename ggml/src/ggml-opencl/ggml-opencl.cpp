@@ -1018,6 +1018,25 @@ static void load_clblast_compat_kernels(ggml_backend_opencl_context * backend_ct
     CL_CHECK((backend_ctx->kernel_clblast_dequantize_block_q4_K = clCreateKernel(backend_ctx->program_clblast_compat, "dequantize_block_q4_K", &err), err));
     CL_CHECK((backend_ctx->kernel_clblast_dequantize_block_q6_K = clCreateKernel(backend_ctx->program_clblast_compat, "dequantize_block_q6_K", &err), err));
 }
+
+static void load_cl_set_rows_kernels(ggml_backend_opencl_context * backend_ctx, const std::string & compile_opts) {
+    cl_int err;
+
+#ifdef GGML_OPENCL_EMBED_KERNELS
+    const std::string kernel_src {
+        #include "set_rows.cl.h"
+    };
+#else
+    const std::string kernel_src = read_file("set_rows.cl");
+#endif
+    backend_ctx->program_set_rows =
+        build_program_from_source(backend_ctx->context, backend_ctx->device, kernel_src.c_str(), compile_opts);
+
+    CL_CHECK((backend_ctx->kernel_set_rows_f32_i64 = clCreateKernel(backend_ctx->program_set_rows, "kernel_set_rows_f32_i64", &err), err));
+    CL_CHECK((backend_ctx->kernel_set_rows_f32_i32 = clCreateKernel(backend_ctx->program_set_rows, "kernel_set_rows_f32_i32", &err), err));
+    CL_CHECK((backend_ctx->kernel_set_rows_f16_i64 = clCreateKernel(backend_ctx->program_set_rows, "kernel_set_rows_f16_i64", &err), err));
+    CL_CHECK((backend_ctx->kernel_set_rows_f16_i32 = clCreateKernel(backend_ctx->program_set_rows, "kernel_set_rows_f16_i32", &err), err));
+}
 #else
 static bool ggml_opencl_use_legacy_nvidia(const ggml_backend_opencl_context * backend_ctx) {
     GGML_UNUSED(backend_ctx);
@@ -2492,20 +2511,7 @@ static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx, ggml_cl_ve
 
     // set_rows
     {
-#ifdef GGML_OPENCL_EMBED_KERNELS
-        const std::string kernel_src {
-            #include "set_rows.cl.h"
-        };
-#else
-        const std::string kernel_src = read_file("set_rows.cl");
-#endif
-        backend_ctx->program_set_rows =
-            build_program_from_source(backend_ctx->context, backend_ctx->device, kernel_src.c_str(), compile_opts);
-
-        CL_CHECK((backend_ctx->kernel_set_rows_f32_i64 = clCreateKernel(backend_ctx->program_set_rows, "kernel_set_rows_f32_i64", &err), err));
-        CL_CHECK((backend_ctx->kernel_set_rows_f32_i32 = clCreateKernel(backend_ctx->program_set_rows, "kernel_set_rows_f32_i32", &err), err));
-        CL_CHECK((backend_ctx->kernel_set_rows_f16_i64 = clCreateKernel(backend_ctx->program_set_rows, "kernel_set_rows_f16_i64", &err), err));
-        CL_CHECK((backend_ctx->kernel_set_rows_f16_i32 = clCreateKernel(backend_ctx->program_set_rows, "kernel_set_rows_f16_i32", &err), err));
+        load_cl_set_rows_kernels(backend_ctx, compile_opts);
         GGML_LOG_CONT(".");
     }
 
@@ -3447,6 +3453,7 @@ static ggml_backend_opencl_context * ggml_cl2_init(ggml_backend_dev_t dev) {
 #ifdef GGML_OPENCL_USE_CLBLAST
         GGML_LOG_INFO("ggml_opencl: enabling legacy NVIDIA / CLBlast compatibility path\n");
         load_clblast_compat_kernels(backend_ctx.get());
+        load_cl_set_rows_kernels(backend_ctx.get(), "-cl-std=CL1.2 -cl-mad-enable -cl-unsafe-math-optimizations -cl-finite-math-only -cl-fast-relaxed-math");
 #else
         GGML_LOG_ERROR("ggml_opencl: legacy NVIDIA mode requires GGML_OPENCL_USE_CLBLAST\n");
         return nullptr;
@@ -4070,6 +4077,17 @@ static bool ggml_opencl_supports_op(ggml_backend_dev_t dev, const struct ggml_te
                 return true;
             case GGML_OP_MUL_MAT:
                 return ggml_opencl_can_mul_mat_legacy(op->src[0], op->src[1], op);
+            case GGML_OP_SET_ROWS:
+                if (op->src[0]->type != GGML_TYPE_F32) {
+                    return false;
+                }
+                switch (op->type) {
+                    case GGML_TYPE_F16:
+                    case GGML_TYPE_F32:
+                        return op->src[1]->type == GGML_TYPE_I64 || op->src[1]->type == GGML_TYPE_I32;
+                    default:
+                        return false;
+                }
             default:
                 return false;
         }
@@ -13605,6 +13623,12 @@ bool ggml_cl_compute_forward(ggml_backend_t backend, struct ggml_tensor * tensor
                     return false;
                 }
                 ggml_cl_mul_mat_legacy_nvidia(backend, src0, src1, tensor);
+                return true;
+            case GGML_OP_SET_ROWS:
+                if (!any_on_device) {
+                    return false;
+                }
+                ggml_cl_set_rows(backend, src0, src1, tensor);
                 return true;
             case GGML_OP_RESHAPE:
             case GGML_OP_VIEW:
