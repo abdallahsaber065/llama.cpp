@@ -6528,21 +6528,20 @@ static bool ggml_cl_can_mul_mat(const struct ggml_tensor * src0, const struct gg
 
 #ifdef GGML_OPENCL_USE_CLBLAST
 static bool ggml_opencl_can_mul_mat_legacy(const struct ggml_tensor * src0, const struct ggml_tensor * src1, const struct ggml_tensor * dst) {
-    if (src0->view_offs != 0 || src1->view_offs != 0 || dst->view_offs != 0) {
-        return false;
-    }
-
-    if (src0->ne[2] != 1 || src0->ne[3] != 1 ||
-        src1->ne[2] != 1 || src1->ne[3] != 1 ||
-        dst->ne[2]  != 1 || dst->ne[3]  != 1) {
-        return false;
-    }
-
     if (!ggml_is_contiguous(src0) || !ggml_is_contiguous(src1) || !ggml_is_contiguous(dst)) {
         return false;
     }
 
     if (src1->type != GGML_TYPE_F32 || dst->type != GGML_TYPE_F32) {
+        return false;
+    }
+
+    if (src0->ne[0] != src1->ne[0]) {
+        return false;
+    }
+
+    // batch repeat ratios must be integer
+    if (src1->ne[2] % src0->ne[2] != 0 || src1->ne[3] % src0->ne[3] != 0) {
         return false;
     }
 
@@ -6563,10 +6562,9 @@ static bool ggml_opencl_can_mul_mat_legacy(const struct ggml_tensor * src0, cons
 static cl_mem ggml_opencl_create_tensor_subbuffer(const ggml_backend_opencl_context * backend_ctx, const ggml_tensor * tensor) {
     const auto * extra = (const ggml_tensor_extra_cl *) tensor->extra;
     GGML_ASSERT(extra != nullptr);
-    GGML_ASSERT(tensor->view_offs == 0 && "legacy CLBlast path requires non-view tensors");
 
     cl_buffer_region region;
-    region.origin = extra->offset;
+    region.origin = extra->offset + tensor->view_offs;
     region.size   = ggml_nbytes(tensor);
 
     cl_int err;
@@ -6597,9 +6595,9 @@ static cl_mem ggml_opencl_legacy_prepare_src0_f32(ggml_backend_t backend, const 
     CL_CHECK(clSetKernelArg(kernel, 1, sizeof(cl_mem), &backend_ctx->prealloc_src0.buffer));
 
     size_t global = ne / ggml_opencl_clblast_global_denom(src0->type);
-    size_t local = ggml_opencl_clblast_local_size(src0->type);
-    const size_t * local_ptr = local == 0 ? nullptr : &local;
-    backend_ctx->enqueue_ndrange_kernel(kernel, 1, &global, const_cast<size_t *>(local_ptr), src0);
+    size_t local  = ggml_opencl_clblast_local_size(src0->type);
+    size_t * local_ptr = local == 0 ? nullptr : &local;
+    backend_ctx->enqueue_ndrange_kernel(kernel, 1, &global, local_ptr, src0);
     CL_CHECK(clReleaseMemObject(raw_src));
 
     *offset_elements = 0;
@@ -6608,46 +6606,84 @@ static cl_mem ggml_opencl_legacy_prepare_src0_f32(ggml_backend_t backend, const 
 
 static void ggml_cl_mul_mat_legacy_nvidia(ggml_backend_t backend, const ggml_tensor * src0, const ggml_tensor * src1, ggml_tensor * dst) {
     auto * backend_ctx = (ggml_backend_opencl_context *) backend->context;
+    const auto * extra0 = (const ggml_tensor_extra_cl *) src0->extra;
     const auto * extra1 = (const ggml_tensor_extra_cl *) src1->extra;
     const auto * extrad = (const ggml_tensor_extra_cl *) dst->extra;
+    GGML_ASSERT(extra0 != nullptr);
     GGML_ASSERT(extra1 != nullptr);
     GGML_ASSERT(extrad != nullptr);
-    GGML_ASSERT(ggml_opencl_can_mul_mat_legacy(src0, src1, dst));
 
-    size_t src0_offset = 0;
-    const cl_mem src0_buf = ggml_opencl_legacy_prepare_src0_f32(backend, src0, &src0_offset);
-    const size_t src1_offset = (extra1->offset + src1->view_offs) / sizeof(float);
-    const size_t dst_offset  = (extrad->offset + dst->view_offs) / sizeof(float);
+    const int64_t ne00 = src0->ne[0]; // K
+    const int64_t ne01 = src0->ne[1]; // M (output features)
+    const int64_t ne02 = src0->ne[2];
+    const int64_t ne03 = src0->ne[3];
 
-    const size_t m = src0->ne[1];
-    const size_t n = src1->ne[1];
-    const size_t k = src0->ne[0];
+    const int64_t ne10 = src1->ne[0]; // K
+    const int64_t ne11 = src1->ne[1]; // N (tokens / seq)
+    const int64_t ne12 = src1->ne[2];
+    const int64_t ne13 = src1->ne[3];
 
-    const auto status = clblast::Gemm<float>(
-        clblast::Layout::kColMajor,
-        clblast::Transpose::kYes,
-        clblast::Transpose::kNo,
-        m,
-        n,
-        k,
-        1.0f,
-        src0_buf,
-        src0_offset,
-        src0->ne[0],
-        extra1->data_device,
-        src1_offset,
-        src1->ne[0],
-        0.0f,
-        extrad->data_device,
-        dst_offset,
-        dst->ne[0],
-        &backend_ctx->queue,
-        nullptr);
+    const int64_t ne0 = dst->ne[0]; // M
+    const int64_t ne1 = dst->ne[1]; // N
+    const int64_t ne2 = dst->ne[2]; // = ne12
+    const int64_t ne3 = dst->ne[3]; // = ne13
 
-    if (status != clblast::StatusCode::kSuccess) {
-        GGML_LOG_ERROR("ggml_opencl: CLBlast GEMM failed with status %d\n", (int) status);
-        GGML_ASSERT(false);
+    const int64_t r2 = ne12 / ne02;
+    const int64_t r3 = ne13 / ne03;
+
+    const size_t m = (size_t)ne01;
+    const size_t n = (size_t)ne11;
+    const size_t k = (size_t)ne00;
+
+    // Dequantize src0 into a flat F32 prealloc buffer (entire tensor, all batch slices).
+    size_t src0_f32_base = 0;
+    cl_mem src0_f32_buf  = ggml_opencl_legacy_prepare_src0_f32(backend, src0, &src0_f32_base);
+
+    const size_t src1_base_elem = (size_t)(extra1->offset + src1->view_offs) / sizeof(float);
+    const size_t dst_base_elem  = (size_t)(extrad->offset + dst->view_offs)  / sizeof(float);
+
+    for (int64_t i03 = 0; i03 < ne03; i03++) {
+        for (int64_t i02 = 0; i02 < ne02; i02++) {
+            // src0 slice: element offset into the dequantised F32 buffer
+            const size_t src0_slice = src0_f32_base
+                + (size_t)(i02 * ne01 * ne00)
+                + (size_t)(i03 * ne02 * ne01 * ne00);
+
+            for (int64_t i13 = i03 * r3; i13 < (i03 + 1) * r3; i13++) {
+                for (int64_t i12 = i02 * r2; i12 < (i02 + 1) * r2; i12++) {
+                    const size_t src1_slice = src1_base_elem
+                        + (size_t)(i12 * ne10 * ne11)
+                        + (size_t)(i13 * ne12 * ne10 * ne11);
+
+                    const size_t dst_slice = dst_base_elem
+                        + (size_t)(i12 * ne0 * ne1)
+                        + (size_t)(i13 * ne2 * ne0 * ne1);
+
+                    const auto status = clblast::Gemm<float>(
+                        clblast::Layout::kColMajor,
+                        clblast::Transpose::kYes,
+                        clblast::Transpose::kNo,
+                        m, n, k,
+                        1.0f,
+                        src0_f32_buf,        src0_slice, (size_t)ne00,
+                        extra1->data_device, src1_slice, (size_t)ne10,
+                        0.0f,
+                        extrad->data_device, dst_slice,  (size_t)ne0,
+                        &backend_ctx->queue,
+                        nullptr);
+
+                    if (status != clblast::StatusCode::kSuccess) {
+                        GGML_LOG_ERROR("ggml_opencl: CLBlast GEMM failed (%d) for slice [%lld,%lld,%lld,%lld]\n",
+                                       (int)status, (long long)i02, (long long)i03,
+                                       (long long)i12, (long long)i13);
+                        GGML_ASSERT(false);
+                    }
+                }
+            }
+        }
     }
+
+    CL_CHECK(clFinish(backend_ctx->queue));
 }
 #endif
 
