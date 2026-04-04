@@ -9,4 +9,5 @@
 - Added automated GitHub Release publishing for successful `master` builds when `CHANGELOG.md` contains a real version heading, using auto-generated `build-<run_number>` tags and attaching both platform artifacts.
 - Fixed the legacy Kepler runtime scheduler mismatch by enabling OpenCL `SET_ROWS` support for KV-cache writes in the CLBlast compatibility path.
 - Fixed legacy NVIDIA runtime startup on OpenCL 1.2 drivers without FP16 support by skipping FP16 `SET_ROWS` kernel compilation and keeping incompatible F16 KV-cache buffers on CPU.
+- Fixed OpenCL device `ggml_backend_dev_description` to include the OpenCL C version (e.g. `name (OpenCL 1.2 CUDA)`), so the KV-cache CPU fallback that detects legacy OpenCL 1.2 actually triggers instead of leaving F16 caches on GPU and aborting on `SET_ROWS`.
 - Replaced the old upstream-oriented `AGENTS.md` with fork-specific persistent guidance covering this fork's Kepler/OpenCL goal, key files, maintenance workflow, and mandatory changelog/docs updates after changes.

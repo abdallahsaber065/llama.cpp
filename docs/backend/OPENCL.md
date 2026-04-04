@@ -64,6 +64,8 @@ Current focus of the compatibility path:
 | `MUL_MAT_ID` offload  | CPU fallback |
 | Subgroup kernels      | Disabled |
 
+The OpenCL backend reports `ggml_backend_dev_description` as `device name (OpenCL C version)`, matching the init log line. Fork logic (for example F16 KV-cache placement on OpenCL 1.2 without device FP16) relies on that string containing the OpenCL API level.
+
 ## DataType Supports
 
 | DataType               | Status                     |

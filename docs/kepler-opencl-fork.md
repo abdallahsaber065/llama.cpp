@@ -28,6 +28,7 @@ Runtime behavior changes:
 - subgroup-heavy modern OpenCL kernels are skipped in that path,
 - validated `MUL_MAT` workloads use CLBlast,
 - unsupported ops stay on CPU through the scheduler fallback path.
+- KV cache for default F16 K/V may stay on CPU on OpenCL 1.2 devices without `cl_khr_fp16`; device selection uses `ggml_backend_dev_description`, which includes the OpenCL C version string.
 
 ## Supported Build Path
 
