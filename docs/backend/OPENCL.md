@@ -54,6 +54,10 @@ This fork also includes a conservative compatibility path for older NVIDIA OpenC
 
 This path does **not** try to run the full modern OpenCL kernel stack. Instead it keeps the modern `ggml-backend` integration, uses raw packed tensor buffers, offloads `MUL_MAT` through CLBlast, and leaves unsupported graph operations on the CPU scheduler fallback path.
 
+**CLBlast scope:** CLBlast provides BLAS-style routines (for example `GEMM`). It does not implement attention, RoPE, RMS norm, softmax, or other fused graph nodes. Running the **entire** model on GPU still requires those operations to have OpenCL implementations (or CPU fallback). This fork’s legacy path prioritizes correct `MUL_MAT` offload and safe CPU fallback elsewhere.
+
+**Per-buffer limit:** Many drivers cap a single `cl_mem` allocation (`CL_DEVICE_MAX_MEM_ALLOC_SIZE`, often 1 GiB on older NVIDIA OpenCL). The legacy path dequantizes weights to FP32 for CLBlast; when `ne × sizeof(float)` would exceed a conservative budget derived from that cap, it dequantizes and multiplies **column slices** of `src0` (along `ne01`) instead of one giant buffer. If a tensor cannot be tiled under sub-buffer alignment and dequant kernel work-group constraints, `MUL_MAT` is left for the CPU backend.
+
 Current focus of the compatibility path:
 
 | Area                  | Status |
@@ -139,6 +143,7 @@ Notes:
 - `GGML_OPENCL_LEGACY_NVIDIA=ON` forces the backend onto the OpenCL 1.2-safe CLBlast path.
 - This mode intentionally disables the current subgroup-heavy OpenCL kernels.
 - Unsupported operations continue on CPU through the normal multi-backend scheduler.
+- Large `MUL_MAT` weights (for example very wide embedding tables) may use chunked GPU dequant + multiple CLBlast GEMM calls so each staging buffer stays under `CL_DEVICE_MAX_MEM_ALLOC_SIZE`.
 - The fork-specific GitHub Actions workflow uses the `fork-kepler-linux-release` and `fork-kepler-windows-release` presets from `CMakePresets.json`.
 
 ## Android

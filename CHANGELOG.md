@@ -2,6 +2,7 @@
 
 ## 0.1.0
 
+- Legacy NVIDIA / CLBlast `MUL_MAT` path: dequantize weights in column slices when a single FP32 staging buffer would exceed `CL_DEVICE_MAX_MEM_ALLOC_SIZE` (fixes OpenCL `-4` / allocation failure on 1 GiB max-alloc GPUs with large matrices such as big vocab embeddings); `supports_op` rejects shapes that cannot be tiled under device alignment and dequant work-group rules.
 - Added a legacy NVIDIA / Kepler OpenCL compatibility profile that accepts OpenCL 1.2 devices, routes validated `MUL_MAT` workloads through CLBlast, and falls back to CPU for unsupported operations.
 - Replaced the upstream multi-backend build matrix with a fork-specific GitHub Actions workflow and CMake presets focused on the Kepler OpenCL / CLBlast path, and documented the fork maintenance process under `docs/`.
 - Fixed the fork-specific Kepler OpenCL CI by restoring the missing Windows OpenCL SDK setup and resolving the C++ forward-declaration break in the legacy CLBlast path.

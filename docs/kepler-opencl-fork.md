@@ -27,6 +27,7 @@ Runtime behavior changes:
 - OpenCL 1.2 is accepted for the legacy NVIDIA path,
 - subgroup-heavy modern OpenCL kernels are skipped in that path,
 - validated `MUL_MAT` workloads use CLBlast,
+- when a single FP32 dequant buffer would exceed `CL_DEVICE_MAX_MEM_ALLOC_SIZE`, `MUL_MAT` is split into column slices (still on GPU) instead of failing with OpenCL allocation errors,
 - unsupported ops stay on CPU through the scheduler fallback path.
 - KV cache for default F16 K/V may stay on CPU on OpenCL 1.2 devices without `cl_khr_fp16`; device selection uses `ggml_backend_dev_description`, which includes the OpenCL C version string.
 
