@@ -85,11 +85,38 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v6
 
+      - name: Install Ninja
+        run: choco install ninja
+
+      - name: Install OpenCL SDK
+        shell: powershell
+        run: |
+          git clone https://github.com/KhronosGroup/OpenCL-Headers
+          Push-Location OpenCL-Headers
+          cmake -B build `
+            -DBUILD_TESTING=OFF `
+            -DOPENCL_HEADERS_BUILD_TESTING=OFF `
+            -DOPENCL_HEADERS_BUILD_CXX_TESTS=OFF `
+            -DCMAKE_INSTALL_PREFIX="$env:RUNNER_TEMP/opencl-x64-release"
+          cmake --build build --target install --config Release
+          Pop-Location
+
+          git clone https://github.com/KhronosGroup/OpenCL-ICD-Loader
+          Push-Location OpenCL-ICD-Loader
+          cmake -B build-x64-release `
+            -A x64 `
+            -DCMAKE_PREFIX_PATH="$env:RUNNER_TEMP/opencl-x64-release" `
+            -DCMAKE_INSTALL_PREFIX="$env:RUNNER_TEMP/opencl-x64-release"
+          cmake --build build-x64-release --target install --config Release
+          Pop-Location
+
+          Add-Content $env:GITHUB_PATH "$env:RUNNER_TEMP/opencl-x64-release/bin"
+
       - name: Set up MSVC environment
         uses: ilammy/msvc-dev-cmd@v1
 
       - name: Configure
-        run: cmake --preset fork-kepler-windows-release
+        run: cmake --preset fork-kepler-windows-release -DCMAKE_PREFIX_PATH="$env:RUNNER_TEMP/opencl-x64-release"
 
       - name: Build
         run: cmake --build --preset fork-kepler-windows-release --parallel
@@ -104,6 +131,9 @@ jobs:
           Copy-Item build-fork-kepler-windows-release\bin\* dist\windows -Recurse -Force
           if (Test-Path build-fork-kepler-windows-release\lib) {
             Copy-Item build-fork-kepler-windows-release\lib\* dist\windows -Recurse -Force
+          }
+          if (Test-Path "$env:RUNNER_TEMP/opencl-x64-release/bin") {
+            Copy-Item "$env:RUNNER_TEMP/opencl-x64-release/bin\*" dist\windows -Recurse -Force
           }
 
       - name: Upload artifacts

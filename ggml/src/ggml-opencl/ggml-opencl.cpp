@@ -56,6 +56,11 @@
 
 bool ggml_cl_compute_forward(ggml_backend_t backend, struct ggml_tensor * tensor);
 
+#ifdef GGML_OPENCL_USE_CLBLAST
+static bool ggml_opencl_can_mul_mat_legacy(const struct ggml_tensor * src0, const struct ggml_tensor * src1, const struct ggml_tensor * dst);
+static void ggml_cl_mul_mat_legacy_nvidia(ggml_backend_t backend, const struct ggml_tensor * src0, const struct ggml_tensor * src1, ggml_tensor * dst);
+#endif
+
 // See https://gmplib.org/~tege/divcnst-pldi94.pdf figure 4.1.
 // Precompute mp (m' in the paper) and L such that division
 // can be computed using a multiply (high 32b of 64b result)
