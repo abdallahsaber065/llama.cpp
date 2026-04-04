@@ -1,6 +1,7 @@
 # llama.cpp for OpenCL
 
 - [Background](#background)
+- [Fork Guide](#fork-guide)
 - [OS](#os)
 - [Hardware](#hardware)
 - [DataType Supports](#datatype-supports)
@@ -19,6 +20,10 @@ OpenCL (Open Computing Language) is an open, royalty-free standard for cross-pla
 ### Llama.cpp + OpenCL
 
 The llama.cpp OpenCL backend is designed to enable llama.cpp on **Qualcomm Adreno GPU** firstly via OpenCL. Thanks to the portabilty of OpenCL, the OpenCL backend can also run on certain Intel GPUs such as those that do not have [SYCL](/docs/backend/SYCL.md) support although the performance is not optimal.
+
+## Fork Guide
+
+For the Kepler-focused fork workflow, GitHub Actions pipeline, and upstream-sync checklist, see [Kepler OpenCL Fork Guide](/docs/kepler-opencl-fork.md).
 
 ## OS
 
@@ -43,6 +48,22 @@ The llama.cpp OpenCL backend is designed to enable llama.cpp on **Qualcomm Adren
 > A6x GPUs with a recent driver and compiler are supported; they are usually found in IoT platforms.
 However, A6x GPUs in phones are likely not supported due to the outdated driver and compiler.
 
+### Legacy NVIDIA / Kepler
+
+This fork also includes a conservative compatibility path for older NVIDIA OpenCL stacks. It is intended for legacy GPUs such as Kepler-class mobile Quadro parts that cannot use the modern CUDA backend.
+
+This path does **not** try to run the full modern OpenCL kernel stack. Instead it keeps the modern `ggml-backend` integration, uses raw packed tensor buffers, offloads `MUL_MAT` through CLBlast, and leaves unsupported graph operations on the CPU scheduler fallback path.
+
+Current focus of the compatibility path:
+
+| Area                  | Status |
+|:---------------------:|:------:|
+| OpenCL 1.2 init path  | Support |
+| CLBlast GEMM backend  | Support |
+| `MUL_MAT` offload     | Support |
+| `MUL_MAT_ID` offload  | CPU fallback |
+| Subgroup kernels      | Disabled |
+
 ## DataType Supports
 
 | DataType               | Status                     |
@@ -51,6 +72,18 @@ However, A6x GPUs in phones are likely not supported due to the outdated driver 
 | Q6_K                   | Support, but not optimized |
 | Q8_0                   | Support                    |
 | MXFP4                  | Support                    |
+
+For the legacy NVIDIA / Kepler compatibility path, the current GPU-offloaded `MUL_MAT` path is limited to:
+
+| DataType | Status |
+|:--------:|:------:|
+| F32      | Support |
+| F16      | Support |
+| Q4_0     | Support |
+| Q4_1     | Support |
+| Q8_0     | Support |
+| Q4_K     | Support |
+| Q6_K     | Support |
 
 ## Model Preparation
 
@@ -83,6 +116,28 @@ The OpenCL backend has the following CMake options that control the behavior of 
 |:---------------------------------:|:--------------:|:------------------------------------------|
 | `GGML_OPENCL_EMBED_KERNELS`       | `ON`           | Embed OpenCL kernels into the executable. |
 | `GGML_OPENCL_USE_ADRENO_KERNELS`  | `ON`           | Use kernels optimized for Adreno.         |
+| `GGML_OPENCL_USE_CLBLAST`         | `OFF`          | Use CLBlast for OpenCL matmul.            |
+| `GGML_OPENCL_LEGACY_NVIDIA`       | `OFF`          | Enable the OpenCL 1.2 / CLBlast compatibility path for old NVIDIA GPUs. |
+
+### Legacy NVIDIA / Kepler Build
+
+Use the following options for the legacy NVIDIA compatibility profile:
+
+```powershell
+cmake -B build-kepler -G Ninja `
+  -DGGML_OPENCL=ON `
+  -DGGML_OPENCL_LEGACY_NVIDIA=ON `
+  -DGGML_OPENCL_USE_CLBLAST=ON `
+  -DGGML_OPENCL_USE_ADRENO_KERNELS=OFF `
+  -DGGML_OPENCL_TARGET_VERSION=120
+```
+
+Notes:
+
+- `GGML_OPENCL_LEGACY_NVIDIA=ON` forces the backend onto the OpenCL 1.2-safe CLBlast path.
+- This mode intentionally disables the current subgroup-heavy OpenCL kernels.
+- Unsupported operations continue on CPU through the normal multi-backend scheduler.
+- The fork-specific GitHub Actions workflow uses the `fork-kepler-linux-release` and `fork-kepler-windows-release` presets from `CMakePresets.json`.
 
 ## Android
 
@@ -274,6 +329,7 @@ ninja
 - Flash attention does not always improve performance.
 - Currently OpenCL backend works on A6xx GPUs with recent drivers and compilers (usually found in IoT platforms).
   However, it does not work on A6xx GPUs found in phones with old drivers and compilers.
+- The legacy NVIDIA / Kepler mode is intentionally conservative and currently offloads only the validated `MUL_MAT` path.
 
 ## TODO
 

@@ -1,0 +1,114 @@
+name: Fork Kepler OpenCL Build
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - master
+    paths:
+      - ".github/workflows/fork-kepler-opencl-build.yml"
+      - "CMakeLists.txt"
+      - "CMakePresets.json"
+      - "ggml/**"
+      - "src/**"
+      - "include/**"
+      - "common/**"
+      - "docs/**"
+      - "CHANGELOG.md"
+  pull_request:
+    types: [opened, synchronize, reopened]
+    paths:
+      - ".github/workflows/fork-kepler-opencl-build.yml"
+      - "CMakeLists.txt"
+      - "CMakePresets.json"
+      - "ggml/**"
+      - "src/**"
+      - "include/**"
+      - "common/**"
+      - "docs/**"
+      - "CHANGELOG.md"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.ref || github.run_id }}
+  cancel-in-progress: true
+
+jobs:
+  linux-kepler-opencl:
+    name: Linux Kepler OpenCL
+    runs-on: ubuntu-22.04
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential \
+            cmake \
+            ninja-build \
+            pkg-config \
+            python3 \
+            ocl-icd-opencl-dev \
+            opencl-headers
+
+      - name: Configure
+        run: cmake --preset fork-kepler-linux-release
+
+      - name: Build
+        run: cmake --build --preset fork-kepler-linux-release --parallel
+
+      - name: Smoke check
+        run: ./build-fork-kepler-linux-release/bin/llama-cli --help > /dev/null
+
+      - name: Collect artifacts
+        run: |
+          mkdir -p dist/linux
+          cp -a build-fork-kepler-linux-release/bin/. dist/linux/
+          if [ -d build-fork-kepler-linux-release/lib ]; then
+            cp -a build-fork-kepler-linux-release/lib/. dist/linux/
+          fi
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: fork-kepler-opencl-linux
+          path: dist/linux
+          if-no-files-found: error
+
+  windows-kepler-opencl:
+    name: Windows Kepler OpenCL
+    runs-on: windows-2022
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up MSVC environment
+        uses: ilammy/msvc-dev-cmd@v1
+
+      - name: Configure
+        run: cmake --preset fork-kepler-windows-release
+
+      - name: Build
+        run: cmake --build --preset fork-kepler-windows-release --parallel
+
+      - name: Smoke check
+        run: .\build-fork-kepler-windows-release\bin\llama-cli.exe --help > $null
+
+      - name: Collect artifacts
+        shell: powershell
+        run: |
+          New-Item -ItemType Directory -Force -Path dist\windows | Out-Null
+          Copy-Item build-fork-kepler-windows-release\bin\* dist\windows -Recurse -Force
+          if (Test-Path build-fork-kepler-windows-release\lib) {
+            Copy-Item build-fork-kepler-windows-release\lib\* dist\windows -Recurse -Force
+          }
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: fork-kepler-opencl-windows
+          path: dist/windows
+          if-no-files-found: error

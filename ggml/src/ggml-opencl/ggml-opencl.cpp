@@ -14,6 +14,9 @@
 #include "ggml.h"
 
 #include <CL/cl.h>
+#ifdef GGML_OPENCL_USE_CLBLAST
+#include <clblast.h>
+#endif
 
 #include <inttypes.h>
 #include <string.h>
@@ -87,6 +90,7 @@ static fastdiv_vals init_fastdiv_values(uint64_t d_64) {
 enum GPU_FAMILY {
     ADRENO,
     INTEL,
+    NVIDIA,
     UNKNOWN,
 };
 
@@ -387,6 +391,7 @@ struct ggml_backend_opencl_context {
 
     GPU_FAMILY gpu_family;
     ADRENO_GPU_GEN adreno_gen;
+    ggml_cl_version opencl_c_version;
 
     cl_int alignment;
     size_t max_alloc_size;
@@ -394,6 +399,8 @@ struct ggml_backend_opencl_context {
     bool fp16_support;
     bool has_vector_subgroup_broadcast;
     bool disable_fusion;
+    bool legacy_nvidia;
+    bool supports_subgroups;
 
     bool adreno_has_large_buffer;
     bool adreno_use_large_buffer;
@@ -406,6 +413,16 @@ struct ggml_backend_opencl_context {
 
     cl_context context;
     cl_command_queue queue;
+
+#ifdef GGML_OPENCL_USE_CLBLAST
+    cl_program program_clblast_compat = nullptr;
+    cl_kernel kernel_clblast_convert_row_f16 = nullptr;
+    cl_kernel kernel_clblast_dequantize_row_q4_0 = nullptr;
+    cl_kernel kernel_clblast_dequantize_row_q4_1 = nullptr;
+    cl_kernel kernel_clblast_dequantize_row_q8_0 = nullptr;
+    cl_kernel kernel_clblast_dequantize_block_q4_K = nullptr;
+    cl_kernel kernel_clblast_dequantize_block_q6_K = nullptr;
+#endif
 
     // prealloc buffers for transposing weights and activations
     ggml_cl_buffer prealloc_quant_trans;
@@ -783,6 +800,221 @@ static cl_program build_program_from_source(cl_context ctx, cl_device_id dev, co
 
     return p;
 }
+
+#ifdef GGML_OPENCL_USE_CLBLAST
+static const char * ggml_opencl_clblast_compat_source = R"CLC(
+#define QK4_0 32
+#define QR4_0 2
+#define QK4_1 32
+#define QR4_1 2
+#define QK8_0 32
+#define QR8_0 1
+#define QK_K 256
+
+typedef char int8_t;
+typedef uchar uint8_t;
+
+struct __attribute__((packed)) block_q4_0 {
+    half d;
+    uint8_t qs[QK4_0 / 2];
+};
+
+struct __attribute__((packed)) block_q4_1 {
+    half d;
+    half m;
+    uint8_t qs[QK4_1 / 2];
+};
+
+struct __attribute__((packed)) block_q8_0 {
+    half d;
+    int8_t qs[QK8_0];
+};
+
+struct __attribute__((packed)) block_q4_K {
+    half d;
+    half dmin;
+    uint8_t scales[12];
+    uint8_t qs[128];
+};
+
+struct __attribute__((packed)) block_q6_K {
+    uint8_t ql[128];
+    uint8_t qh[64];
+    int8_t scales[16];
+    half d;
+};
+
+inline void get_scale_min_k4(int j, const __global uint8_t * q, uint8_t * d, uint8_t * m) {
+    if (j < 4) {
+        *d = q[j] & 63;
+        *m = q[j + 4] & 63;
+    } else {
+        *d = (q[j + 4] & 0xF) | ((q[j - 4] >> 6) << 4);
+        *m = (q[j + 4] >> 4) | ((q[j - 0] >> 6) << 4);
+    }
+}
+
+inline void dequantize_q4_0(__global const struct block_q4_0 * x, int ib, int iqs, float * v0, float * v1) {
+    const float d = vload_half(0, &x[ib].d);
+    const uint8_t vui = x[ib].qs[iqs];
+    *v0 = ((int8_t)(vui & 0xF) - 8) * d;
+    *v1 = ((int8_t)(vui >> 4) - 8) * d;
+}
+
+inline void dequantize_q4_1(__global const struct block_q4_1 * x, int ib, int iqs, float * v0, float * v1) {
+    const float d = vload_half(0, &x[ib].d);
+    const float m = vload_half(0, &x[ib].m);
+    const uint8_t vui = x[ib].qs[iqs];
+    *v0 = (vui & 0xF) * d + m;
+    *v1 = (vui >> 4) * d + m;
+}
+
+inline void dequantize_q8_0(__global const struct block_q8_0 * x, int ib, int iqs, float * v0, float * v1) {
+    const float d = vload_half(0, &x[ib].d);
+    *v0 = x[ib].qs[iqs + 0] * d;
+    *v1 = x[ib].qs[iqs + 1] * d;
+}
+
+__kernel void convert_row_f16(__global half * x, __global float * y) {
+    const int i = get_global_id(0);
+    y[i] = vload_half(0, &x[i]);
+}
+
+__kernel void dequantize_row_q4_0(__global struct block_q4_0 * x, __global float * y) {
+    const int i = get_global_id(0) * 2;
+    const int ib = i / QK4_0;
+    const int iqs = (i % QK4_0) / QR4_0;
+    const int iybs = i - i % QK4_0;
+    float v0, v1;
+    dequantize_q4_0(x, ib, iqs, &v0, &v1);
+    y[iybs + iqs + 0] = v0;
+    y[iybs + iqs + QK4_0/2] = v1;
+}
+
+__kernel void dequantize_row_q4_1(__global struct block_q4_1 * x, __global float * y) {
+    const int i = get_global_id(0) * 2;
+    const int ib = i / QK4_1;
+    const int iqs = (i % QK4_1) / QR4_1;
+    const int iybs = i - i % QK4_1;
+    float v0, v1;
+    dequantize_q4_1(x, ib, iqs, &v0, &v1);
+    y[iybs + iqs + 0] = v0;
+    y[iybs + iqs + QK4_1/2] = v1;
+}
+
+__kernel void dequantize_row_q8_0(__global struct block_q8_0 * x, __global float * y) {
+    const int i = get_global_id(0) * 2;
+    const int ib = i / QK8_0;
+    const int iqs = (i % QK8_0) / QR8_0;
+    const int iybs = i - i % QK8_0;
+    float v0, v1;
+    dequantize_q8_0(x, ib, iqs, &v0, &v1);
+    y[iybs + iqs + 0] = v0;
+    y[iybs + iqs + 1] = v1;
+}
+
+__kernel void dequantize_block_q4_K(__global const struct block_q4_K * x, __global float * yy) {
+    const int i = get_group_id(0);
+    const int tid = get_local_id(0);
+    const int il = tid / 8;
+    const int ir = tid % 8;
+    const int is = 2 * il;
+    const int n = 4;
+
+    __global float * y = yy + i * QK_K + 64 * il + n * ir;
+    const float dall = vload_half(0, &x[i].d);
+    const float dmin = vload_half(0, &x[i].dmin);
+    __global const uint8_t * q = x[i].qs + 32 * il + n * ir;
+
+    uint8_t sc, m;
+    get_scale_min_k4(is + 0, x[i].scales, &sc, &m);
+    const float d1 = dall * sc;
+    const float m1 = dmin * m;
+    get_scale_min_k4(is + 1, x[i].scales, &sc, &m);
+    const float d2 = dall * sc;
+    const float m2 = dmin * m;
+
+    for (int l = 0; l < n; ++l) {
+        y[l + 0] = d1 * (q[l] & 0xF) - m1;
+        y[l + 32] = d2 * (q[l] >> 4) - m2;
+    }
+}
+
+__kernel void dequantize_block_q6_K(__global const struct block_q6_K * x, __global float * yy) {
+    const int i = get_group_id(0);
+    const int tid = get_local_id(0);
+    const int ip = tid / 32;
+    const int il = tid - 32 * ip;
+    const int is = 8 * ip + il / 16;
+
+    __global float * y = yy + i * QK_K + 128 * ip + il;
+    const float d = vload_half(0, &x[i].d);
+    __global const uint8_t * ql = x[i].ql + 64 * ip + il;
+    const uint8_t qh = x[i].qh[32 * ip + il];
+    __global const int8_t * sc = x[i].scales + is;
+
+    y[0]  = d * sc[0] * ((int8_t)((ql[0]  & 0xF) | (((qh >> 0) & 3) << 4)) - 32);
+    y[32] = d * sc[2] * ((int8_t)((ql[32] & 0xF) | (((qh >> 2) & 3) << 4)) - 32);
+    y[64] = d * sc[4] * ((int8_t)((ql[0]  >> 4) | (((qh >> 4) & 3) << 4)) - 32);
+    y[96] = d * sc[6] * ((int8_t)((ql[32] >> 4) | (((qh >> 6) & 3) << 4)) - 32);
+}
+)CLC";
+
+static bool ggml_opencl_use_legacy_nvidia(const ggml_backend_opencl_context * backend_ctx) {
+    return backend_ctx != nullptr && backend_ctx->legacy_nvidia;
+}
+
+static cl_kernel ggml_opencl_clblast_dequant_kernel(const ggml_backend_opencl_context * backend_ctx, ggml_type type) {
+    switch (type) {
+        case GGML_TYPE_F16:  return backend_ctx->kernel_clblast_convert_row_f16;
+        case GGML_TYPE_Q4_0: return backend_ctx->kernel_clblast_dequantize_row_q4_0;
+        case GGML_TYPE_Q4_1: return backend_ctx->kernel_clblast_dequantize_row_q4_1;
+        case GGML_TYPE_Q8_0: return backend_ctx->kernel_clblast_dequantize_row_q8_0;
+        case GGML_TYPE_Q4_K: return backend_ctx->kernel_clblast_dequantize_block_q4_K;
+        case GGML_TYPE_Q6_K: return backend_ctx->kernel_clblast_dequantize_block_q6_K;
+        default:             return nullptr;
+    }
+}
+
+static size_t ggml_opencl_clblast_global_denom(ggml_type type) {
+    switch (type) {
+        case GGML_TYPE_Q4_K: return 8;
+        case GGML_TYPE_Q6_K: return 4;
+        default:             return 1;
+    }
+}
+
+static size_t ggml_opencl_clblast_local_size(ggml_type type) {
+    switch (type) {
+        case GGML_TYPE_Q4_K: return 32;
+        case GGML_TYPE_Q6_K: return 64;
+        default:             return 0;
+    }
+}
+
+static void load_clblast_compat_kernels(ggml_backend_opencl_context * backend_ctx) {
+    cl_int err;
+    const std::string compile_opts = "-cl-std=CL1.2 -cl-mad-enable -cl-fast-relaxed-math";
+
+    backend_ctx->program_clblast_compat = build_program_from_source(
+        backend_ctx->context,
+        backend_ctx->device,
+        ggml_opencl_clblast_compat_source,
+        compile_opts);
+
+    CL_CHECK((backend_ctx->kernel_clblast_convert_row_f16      = clCreateKernel(backend_ctx->program_clblast_compat, "convert_row_f16",      &err), err));
+    CL_CHECK((backend_ctx->kernel_clblast_dequantize_row_q4_0  = clCreateKernel(backend_ctx->program_clblast_compat, "dequantize_row_q4_0",  &err), err));
+    CL_CHECK((backend_ctx->kernel_clblast_dequantize_row_q4_1  = clCreateKernel(backend_ctx->program_clblast_compat, "dequantize_row_q4_1",  &err), err));
+    CL_CHECK((backend_ctx->kernel_clblast_dequantize_row_q8_0  = clCreateKernel(backend_ctx->program_clblast_compat, "dequantize_row_q8_0",  &err), err));
+    CL_CHECK((backend_ctx->kernel_clblast_dequantize_block_q4_K = clCreateKernel(backend_ctx->program_clblast_compat, "dequantize_block_q4_K", &err), err));
+    CL_CHECK((backend_ctx->kernel_clblast_dequantize_block_q6_K = clCreateKernel(backend_ctx->program_clblast_compat, "dequantize_block_q6_K", &err), err));
+}
+#else
+static bool ggml_opencl_use_legacy_nvidia(const ggml_backend_opencl_context * backend_ctx) {
+    GGML_UNUSED(backend_ctx);
+    return false;
+}
+#endif
 
 static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx, ggml_cl_version opencl_c_version) {
     cl_int err;
@@ -3005,9 +3237,22 @@ static ggml_backend_opencl_context * ggml_cl2_init(ggml_backend_dev_t dev) {
     // when the associated device is initialized
     backend_ctx->ref_count  = 0;
 
-    if (strstr(dev_ctx->device_name.c_str(), "Adreno") ||
+    const bool is_adreno =
+        strstr(dev_ctx->device_name.c_str(), "Adreno") ||
         strstr(dev_ctx->device_name.c_str(), "Qualcomm") ||
-        strstr(dev_ctx->device_version.c_str(), "Adreno")) {
+        strstr(dev_ctx->device_version.c_str(), "Adreno");
+    const bool is_intel = strstr(dev_ctx->device_name.c_str(), "Intel");
+    const bool is_nvidia =
+        strstr(dev_ctx->platform_name.c_str(), "NVIDIA") ||
+        strstr(dev_ctx->device_name.c_str(), "NVIDIA") ||
+        strstr(dev_ctx->device_name.c_str(), "Quadro") ||
+        strstr(dev_ctx->device_name.c_str(), "GeForce") ||
+        strstr(dev_ctx->device_name.c_str(), "Tesla");
+
+    backend_ctx->legacy_nvidia = false;
+    backend_ctx->supports_subgroups = false;
+
+    if (is_adreno) {
         backend_ctx->gpu_family = GPU_FAMILY::ADRENO;
         // Usually device version contains the detailed device name
         backend_ctx->adreno_gen = get_adreno_gpu_gen(dev_ctx->device_version.c_str());
@@ -3017,8 +3262,13 @@ static ggml_backend_opencl_context * ggml_cl2_init(ggml_backend_dev_t dev) {
 
         // Use wave size of 64 for all Adreno GPUs.
         backend_ctx->adreno_wave_size = 64;
-    } else if (strstr(dev_ctx->device_name.c_str(), "Intel")) {
+    } else if (is_intel) {
         backend_ctx->gpu_family = GPU_FAMILY::INTEL;
+    } else if (is_nvidia) {
+        backend_ctx->gpu_family = GPU_FAMILY::NVIDIA;
+#ifdef GGML_OPENCL_LEGACY_NVIDIA
+        backend_ctx->legacy_nvidia = true;
+#endif
     } else {
         GGML_LOG_ERROR("Unsupported GPU: %s\n", dev_ctx->device_name.c_str());
         backend_ctx->gpu_family = GPU_FAMILY::UNKNOWN;
@@ -3041,10 +3291,12 @@ static ggml_backend_opencl_context * ggml_cl2_init(ggml_backend_dev_t dev) {
 
     ggml_cl_version platform_version = get_opencl_platform_version(dev_ctx->platform);
 
-    // Check device OpenCL version, OpenCL 2.0 or above is required
+    // Check device OpenCL version. Legacy NVIDIA mode accepts OpenCL 1.2.
     ggml_cl_version opencl_c_version = get_opencl_c_version(platform_version, device);
-    if (opencl_c_version.major < 2) {
-        GGML_LOG_ERROR("ggml_opencl: OpenCL 2.0 or above is required\n");
+    backend_ctx->opencl_c_version = opencl_c_version;
+    if (backend_ctx->legacy_nvidia ? opencl_c_version.major < 1 || (opencl_c_version.major == 1 && opencl_c_version.minor < 2)
+                                   : opencl_c_version.major < 2) {
+        GGML_LOG_ERROR("ggml_opencl: OpenCL %s or above is required\n", backend_ctx->legacy_nvidia ? "1.2" : "2.0");
         return nullptr;
     }
 
@@ -3075,15 +3327,17 @@ static ggml_backend_opencl_context * ggml_cl2_init(ggml_backend_dev_t dev) {
     // check Adreno large buffer support
     backend_ctx->adreno_has_large_buffer = strstr(ext_buffer, "cl_qcom_large_buffer") != NULL;
 
-    // fp16 is required
-    if (!backend_ctx->fp16_support) {
+    // fp16 is required for the subgroup-heavy backend but not for the CLBlast compatibility path.
+    if (!backend_ctx->fp16_support && !backend_ctx->legacy_nvidia) {
         GGML_LOG_ERROR("ggml_opencl: device does not support FP16\n");
         return nullptr;
     }
 
     // If OpenCL 3.0 is supported, then check for cl_khr_subgroups, which becomes
     // optional in OpenCL 3.0 (cl_khr_subgroup is mandatory in OpenCL 2.x)
-    if (opencl_c_version.major == 3 && strstr(ext_buffer, "cl_khr_subgroups") == NULL &&
+    if (!backend_ctx->legacy_nvidia &&
+        opencl_c_version.major == 3 &&
+        strstr(ext_buffer, "cl_khr_subgroups") == NULL &&
         strstr(ext_buffer, "cl_intel_subgroups") == NULL) {
         GGML_LOG_ERROR("ggml_opencl: device does not support subgroups (cl_khr_subgroups or cl_intel_subgroups) "
             "(note that subgroups is an optional feature in OpenCL 3.0)\n");
@@ -3105,19 +3359,29 @@ static ggml_backend_opencl_context * ggml_cl2_init(ggml_backend_dev_t dev) {
     clGetDeviceInfo(device, CL_DEVICE_MAX_WORK_GROUP_SIZE, sizeof(size_t), &backend_ctx->max_workgroup_size, NULL);
     GGML_LOG_INFO("ggml_opencl: device max workgroup size: %lu\n", backend_ctx->max_workgroup_size);
 
-    // Check SVM.
-    cl_device_svm_capabilities svm_caps;
-    CL_CHECK(clGetDeviceInfo(device, CL_DEVICE_SVM_CAPABILITIES, sizeof(cl_device_svm_capabilities), &svm_caps, 0));
-    GGML_LOG_INFO("ggml_opencl: SVM coarse grain buffer support: %s\n",
-        svm_caps & CL_DEVICE_SVM_COARSE_GRAIN_BUFFER ? "true" : "false");
-    GGML_LOG_INFO("ggml_opencl: SVM fine grain buffer support: %s\n",
-        svm_caps & CL_DEVICE_SVM_FINE_GRAIN_BUFFER ? "true" : "false");
-    GGML_LOG_INFO("ggml_opencl: SVM fine grain system support: %s\n",
-        svm_caps & CL_DEVICE_SVM_FINE_GRAIN_SYSTEM ? "true" : "false");
-    GGML_LOG_INFO("ggml_opencl: SVM atomics support: %s\n",
-        svm_caps & CL_DEVICE_SVM_ATOMICS ? "true" : "false");
+    if (opencl_c_version.major >= 2) {
+#if CL_TARGET_OPENCL_VERSION >= 200
+        cl_device_svm_capabilities svm_caps;
+        CL_CHECK(clGetDeviceInfo(device, CL_DEVICE_SVM_CAPABILITIES, sizeof(cl_device_svm_capabilities), &svm_caps, 0));
+        GGML_LOG_INFO("ggml_opencl: SVM coarse grain buffer support: %s\n",
+            svm_caps & CL_DEVICE_SVM_COARSE_GRAIN_BUFFER ? "true" : "false");
+        GGML_LOG_INFO("ggml_opencl: SVM fine grain buffer support: %s\n",
+            svm_caps & CL_DEVICE_SVM_FINE_GRAIN_BUFFER ? "true" : "false");
+        GGML_LOG_INFO("ggml_opencl: SVM fine grain system support: %s\n",
+            svm_caps & CL_DEVICE_SVM_FINE_GRAIN_SYSTEM ? "true" : "false");
+        GGML_LOG_INFO("ggml_opencl: SVM atomics support: %s\n",
+            svm_caps & CL_DEVICE_SVM_ATOMICS ? "true" : "false");
+#else
+        GGML_LOG_INFO("ggml_opencl: SVM support not compiled in for this OpenCL header target\n");
+#endif
+    } else {
+        GGML_LOG_INFO("ggml_opencl: SVM support unavailable in OpenCL 1.x\n");
+    }
 
-    if (opencl_c_version.major >= 3) {
+    if (backend_ctx->legacy_nvidia) {
+        backend_ctx->non_uniform_workgroups = false;
+        backend_ctx->supports_subgroups = false;
+    } else if (opencl_c_version.major >= 3) {
         // Assume it is not available for 3.0, since it is optional in 3.0.
         // If compiling against 3.0, then we can query.
         backend_ctx->non_uniform_workgroups = false;
@@ -3125,10 +3389,12 @@ static ggml_backend_opencl_context * ggml_cl2_init(ggml_backend_dev_t dev) {
         CL_CHECK(clGetDeviceInfo(device, CL_DEVICE_NON_UNIFORM_WORK_GROUP_SUPPORT, sizeof(cl_bool),
                                  &backend_ctx->non_uniform_workgroups, 0));
 #endif
+        backend_ctx->supports_subgroups = true;
     } else {
         GGML_ASSERT(opencl_c_version.major == 2);
         // Non-uniform workgroup sizes is mandatory feature in v2.x.
         backend_ctx->non_uniform_workgroups = true;
+        backend_ctx->supports_subgroups = true;
     }
 
     // Print out configurations
@@ -3168,7 +3434,17 @@ static ggml_backend_opencl_context * ggml_cl2_init(ggml_backend_dev_t dev) {
     CL_CHECK((backend_ctx->queue = clCreateCommandQueue(context, device, command_queue_props, &err), err));
 
     // Load kernels
-    load_cl_kernels(backend_ctx.get(), opencl_c_version);
+    if (backend_ctx->legacy_nvidia) {
+#ifdef GGML_OPENCL_USE_CLBLAST
+        GGML_LOG_INFO("ggml_opencl: enabling legacy NVIDIA / CLBlast compatibility path\n");
+        load_clblast_compat_kernels(backend_ctx.get());
+#else
+        GGML_LOG_ERROR("ggml_opencl: legacy NVIDIA mode requires GGML_OPENCL_USE_CLBLAST\n");
+        return nullptr;
+#endif
+    } else {
+        load_cl_kernels(backend_ctx.get(), opencl_c_version);
+    }
 
 #ifdef GGML_OPENCL_USE_ADRENO_KERNELS
     // Allocate intermediate buffers and images
@@ -3198,7 +3474,7 @@ static ggml_backend_opencl_context * ggml_cl2_init(ggml_backend_dev_t dev) {
     backend_ctx->prealloc_act_trans.allocate(context, max_B_d_bytes);
 #endif // GGML_OPENCL_USE_ADRENO_KERNELS
 
-    backend_ctx->disable_fusion = getenv("GGML_OPENCL_DISABLE_FUSION") != nullptr;
+    backend_ctx->disable_fusion = backend_ctx->legacy_nvidia || getenv("GGML_OPENCL_DISABLE_FUSION") != nullptr;
 
     dev_ctx->backend_ctx = backend_ctx.release();
     return dev_ctx->backend_ctx;
@@ -3773,6 +4049,25 @@ static ggml_status ggml_backend_opencl_graph_compute(ggml_backend_t backend, ggm
 static bool ggml_opencl_supports_op(ggml_backend_dev_t dev, const struct ggml_tensor * op) {
     ggml_backend_opencl_device_context * dev_ctx     = (ggml_backend_opencl_device_context *)dev->context;
     ggml_backend_opencl_context *        backend_ctx = dev_ctx->backend_ctx;
+
+    if (ggml_opencl_use_legacy_nvidia(backend_ctx)) {
+#ifdef GGML_OPENCL_USE_CLBLAST
+        switch (op->op) {
+            case GGML_OP_NONE:
+            case GGML_OP_RESHAPE:
+            case GGML_OP_VIEW:
+            case GGML_OP_PERMUTE:
+            case GGML_OP_TRANSPOSE:
+                return true;
+            case GGML_OP_MUL_MAT:
+                return ggml_opencl_can_mul_mat_legacy(op->src[0], op->src[1], op);
+            default:
+                return false;
+        }
+#else
+        return false;
+#endif
+    }
 
     switch (op->op) {
         case GGML_OP_NONE:
@@ -4420,6 +4715,7 @@ static void ggml_backend_opencl_buffer_set_tensor(ggml_backend_buffer_t buffer, 
     cl_command_queue queue = backend_ctx->queue;
 
 #ifdef GGML_OPENCL_SOA_Q
+    if (!ggml_opencl_use_legacy_nvidia(backend_ctx)) {
     // We separate the quantized bits and scale from block_q4_0 by using an
     // additional kernel, where each thread handles a block. We first read the
     // original weights into a temporary buffer, then create two separate
@@ -5256,6 +5552,7 @@ static void ggml_backend_opencl_buffer_set_tensor(ggml_backend_buffer_t buffer, 
 #endif // GGML_OPENCL_USE_ADRENO_KERNELS
         return;
     }
+    }
 #endif // GGML_OPENCL_SOA_Q
 
     ggml_tensor_extra_cl * extra = (ggml_tensor_extra_cl *) tensor->extra;
@@ -5280,6 +5577,7 @@ static void ggml_backend_opencl_buffer_get_tensor(ggml_backend_buffer_t buffer, 
     sync_with_other_backends(backend_ctx);
 
 #ifdef GGML_OPENCL_SOA_Q
+    if (!ggml_opencl_use_legacy_nvidia(backend_ctx)) {
     // In end-to-end runs, get_tensor is usually used to get back the logits,
     // where we can simply do clEnqueueReadBuffer since they are f32.
     // However, in test-backend-ops, the GPU graph is copied to the CPU backend,
@@ -5743,6 +6041,7 @@ static void ggml_backend_opencl_buffer_get_tensor(ggml_backend_buffer_t buffer, 
         CL_CHECK(clReleaseMemObject(data_device));
         return;
     }
+    }
 #endif // GGML_OPENCL_SOA_Q
 
     ggml_tensor_extra_cl * extra = (ggml_tensor_extra_cl *) tensor->extra;
@@ -6182,6 +6481,131 @@ static bool ggml_cl_can_mul_mat(const struct ggml_tensor * src0, const struct gg
              dst->type == GGML_TYPE_F32 &&
             (ne0 >= 32 && ne1 >= 32 && ne10 >= 32);
 }
+
+#ifdef GGML_OPENCL_USE_CLBLAST
+static bool ggml_opencl_can_mul_mat_legacy(const struct ggml_tensor * src0, const struct ggml_tensor * src1, const struct ggml_tensor * dst) {
+    if (src0->view_offs != 0 || src1->view_offs != 0 || dst->view_offs != 0) {
+        return false;
+    }
+
+    if (src0->ne[2] != 1 || src0->ne[3] != 1 ||
+        src1->ne[2] != 1 || src1->ne[3] != 1 ||
+        dst->ne[2]  != 1 || dst->ne[3]  != 1) {
+        return false;
+    }
+
+    if (!ggml_is_contiguous(src0) || !ggml_is_contiguous(src1) || !ggml_is_contiguous(dst)) {
+        return false;
+    }
+
+    if (src1->type != GGML_TYPE_F32 || dst->type != GGML_TYPE_F32) {
+        return false;
+    }
+
+    switch (src0->type) {
+        case GGML_TYPE_F32:
+        case GGML_TYPE_F16:
+        case GGML_TYPE_Q4_0:
+        case GGML_TYPE_Q4_1:
+        case GGML_TYPE_Q8_0:
+        case GGML_TYPE_Q4_K:
+        case GGML_TYPE_Q6_K:
+            return true;
+        default:
+            return false;
+    }
+}
+
+static cl_mem ggml_opencl_create_tensor_subbuffer(const ggml_backend_opencl_context * backend_ctx, const ggml_tensor * tensor) {
+    const auto * extra = (const ggml_tensor_extra_cl *) tensor->extra;
+    GGML_ASSERT(extra != nullptr);
+    GGML_ASSERT(tensor->view_offs == 0 && "legacy CLBlast path requires non-view tensors");
+
+    cl_buffer_region region;
+    region.origin = extra->offset;
+    region.size   = ggml_nbytes(tensor);
+
+    cl_int err;
+    cl_mem sub = clCreateSubBuffer(extra->data_device, CL_MEM_READ_ONLY, CL_BUFFER_CREATE_TYPE_REGION, &region, &err);
+    CL_CHECK(err);
+    GGML_UNUSED(backend_ctx);
+    return sub;
+}
+
+static cl_mem ggml_opencl_legacy_prepare_src0_f32(ggml_backend_t backend, const ggml_tensor * src0, size_t * offset_elements) {
+    auto * backend_ctx = (ggml_backend_opencl_context *) backend->context;
+    const auto * extra0 = (const ggml_tensor_extra_cl *) src0->extra;
+    GGML_ASSERT(extra0 != nullptr);
+
+    if (src0->type == GGML_TYPE_F32) {
+        *offset_elements = (extra0->offset + src0->view_offs) / sizeof(float);
+        return extra0->data_device;
+    }
+
+    const size_t ne = ggml_nelements(src0);
+    backend_ctx->prealloc_src0.allocate(backend_ctx->context, ne * sizeof(float));
+
+    cl_kernel kernel = ggml_opencl_clblast_dequant_kernel(backend_ctx, src0->type);
+    GGML_ASSERT(kernel != nullptr);
+
+    cl_mem raw_src = ggml_opencl_create_tensor_subbuffer(backend_ctx, src0);
+    CL_CHECK(clSetKernelArg(kernel, 0, sizeof(cl_mem), &raw_src));
+    CL_CHECK(clSetKernelArg(kernel, 1, sizeof(cl_mem), &backend_ctx->prealloc_src0.buffer));
+
+    size_t global = ne / ggml_opencl_clblast_global_denom(src0->type);
+    size_t local = ggml_opencl_clblast_local_size(src0->type);
+    const size_t * local_ptr = local == 0 ? nullptr : &local;
+    backend_ctx->enqueue_ndrange_kernel(kernel, 1, &global, const_cast<size_t *>(local_ptr), src0);
+    CL_CHECK(clReleaseMemObject(raw_src));
+
+    *offset_elements = 0;
+    return backend_ctx->prealloc_src0.buffer;
+}
+
+static void ggml_cl_mul_mat_legacy_nvidia(ggml_backend_t backend, const ggml_tensor * src0, const ggml_tensor * src1, ggml_tensor * dst) {
+    auto * backend_ctx = (ggml_backend_opencl_context *) backend->context;
+    const auto * extra1 = (const ggml_tensor_extra_cl *) src1->extra;
+    const auto * extrad = (const ggml_tensor_extra_cl *) dst->extra;
+    GGML_ASSERT(extra1 != nullptr);
+    GGML_ASSERT(extrad != nullptr);
+    GGML_ASSERT(ggml_opencl_can_mul_mat_legacy(src0, src1, dst));
+
+    size_t src0_offset = 0;
+    const cl_mem src0_buf = ggml_opencl_legacy_prepare_src0_f32(backend, src0, &src0_offset);
+    const size_t src1_offset = (extra1->offset + src1->view_offs) / sizeof(float);
+    const size_t dst_offset  = (extrad->offset + dst->view_offs) / sizeof(float);
+
+    const size_t m = src0->ne[1];
+    const size_t n = src1->ne[1];
+    const size_t k = src0->ne[0];
+
+    const auto status = clblast::Gemm<float>(
+        clblast::Layout::kColMajor,
+        clblast::Transpose::kYes,
+        clblast::Transpose::kNo,
+        m,
+        n,
+        k,
+        1.0f,
+        src0_buf,
+        src0_offset,
+        src0->ne[0],
+        extra1->data_device,
+        src1_offset,
+        src1->ne[0],
+        0.0f,
+        extrad->data_device,
+        dst_offset,
+        dst->ne[0],
+        &backend_ctx->queue,
+        nullptr);
+
+    if (status != clblast::StatusCode::kSuccess) {
+        GGML_LOG_ERROR("ggml_opencl: CLBlast GEMM failed with status %d\n", (int) status);
+        GGML_ASSERT(false);
+    }
+}
+#endif
 
 // Copy a noncontiguous tensor to contiguous tensor. ne[] remains the same but
 // nb[] is recalculated such that tensor is contiguous.
@@ -13153,6 +13577,7 @@ typedef void (*ggml_cl_func_t)(ggml_backend_t backend, const ggml_tensor * src0,
 
 bool ggml_cl_compute_forward(ggml_backend_t backend, struct ggml_tensor * tensor) {
     ggml_cl_func_t func = nullptr;
+    ggml_backend_opencl_context * backend_ctx = (ggml_backend_opencl_context *) backend->context;
 
     ggml_tensor * src0 = tensor->src[0];
     ggml_tensor * src1 = tensor->src[1];
@@ -13160,6 +13585,31 @@ bool ggml_cl_compute_forward(ggml_backend_t backend, struct ggml_tensor * tensor
     const bool any_on_device = tensor->extra
         || (src0 != nullptr && src0->extra)
         || (src1 != nullptr && src1->extra);
+
+    if (ggml_opencl_use_legacy_nvidia(backend_ctx)) {
+#ifdef GGML_OPENCL_USE_CLBLAST
+        switch (tensor->op) {
+            case GGML_OP_MUL_MAT:
+                if (!ggml_opencl_can_mul_mat_legacy(src0, src1, tensor)) {
+                    return false;
+                }
+                ggml_cl_mul_mat_legacy_nvidia(backend, src0, src1, tensor);
+                return true;
+            case GGML_OP_RESHAPE:
+            case GGML_OP_VIEW:
+            case GGML_OP_PERMUTE:
+            case GGML_OP_TRANSPOSE:
+            case GGML_OP_NONE:
+                return true;
+            default:
+                GGML_UNUSED(any_on_device);
+                return false;
+        }
+#else
+        GGML_UNUSED(any_on_device);
+        return false;
+#endif
+    }
 
     switch (tensor->op) {
         case GGML_OP_GET_ROWS:

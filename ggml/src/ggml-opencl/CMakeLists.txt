@@ -9,6 +9,44 @@ ggml_add_backend_library(${TARGET_NAME}
 target_link_libraries(${TARGET_NAME} PRIVATE ${OpenCL_LIBRARIES})
 target_include_directories(${TARGET_NAME} PRIVATE ${OpenCL_INCLUDE_DIRS})
 
+if (GGML_OPENCL_USE_CLBLAST)
+    find_package(CLBlast QUIET)
+
+    if (NOT CLBlast_FOUND)
+        include(FetchContent)
+
+        set(SAMPLES OFF CACHE BOOL "" FORCE)
+        set(TUNERS OFF CACHE BOOL "" FORCE)
+        set(CLIENTS OFF CACHE BOOL "" FORCE)
+        set(TESTS OFF CACHE BOOL "" FORCE)
+        set(CUBLAS OFF CACHE BOOL "" FORCE)
+        set(NETLIB OFF CACHE BOOL "" FORCE)
+        set(OPENCL ON CACHE BOOL "" FORCE)
+        set(CUDA OFF CACHE BOOL "" FORCE)
+
+        FetchContent_Declare(
+            clblast
+            GIT_REPOSITORY https://github.com/CNugteren/CLBlast.git
+            GIT_TAG        1.6.3
+            GIT_SHALLOW    TRUE
+        )
+        FetchContent_MakeAvailable(clblast)
+    endif ()
+
+    if (TARGET CLBlast::clblast)
+        target_link_libraries(${TARGET_NAME} PRIVATE CLBlast::clblast)
+    elseif (TARGET clblast)
+        target_link_libraries(${TARGET_NAME} PRIVATE clblast)
+    else ()
+        target_link_libraries(${TARGET_NAME} PRIVATE clblast)
+    endif ()
+    add_compile_definitions(GGML_OPENCL_USE_CLBLAST)
+endif ()
+
+if (GGML_OPENCL_LEGACY_NVIDIA)
+    add_compile_definitions(GGML_OPENCL_LEGACY_NVIDIA)
+endif ()
+
 if (GGML_OPENCL_PROFILING)
     message(STATUS "OpenCL profiling enabled (increases CPU overhead)")
     add_compile_definitions(GGML_OPENCL_PROFILING)

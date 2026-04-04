@@ -255,8 +255,27 @@ option(GGML_OPENCL                          "ggml: use OpenCL"                  
 option(GGML_OPENCL_PROFILING                "ggml: use OpenCL profiling (increases overhead)" OFF)
 option(GGML_OPENCL_EMBED_KERNELS            "ggml: embed kernels"                             ON)
 option(GGML_OPENCL_USE_ADRENO_KERNELS       "ggml: use optimized kernels for Adreno"          ON)
+option(GGML_OPENCL_USE_CLBLAST             "ggml: use CLBlast for OpenCL matmul"             OFF)
+option(GGML_OPENCL_LEGACY_NVIDIA           "ggml: enable legacy NVIDIA / OpenCL 1.2 mode"    OFF)
 set   (GGML_OPENCL_TARGET_VERSION "300" CACHE STRING
                                             "ggml: OpenCL API version to target")
+
+if (GGML_OPENCL_LEGACY_NVIDIA)
+    if (NOT GGML_OPENCL_USE_CLBLAST)
+        message(STATUS "ggml: enabling CLBlast because GGML_OPENCL_LEGACY_NVIDIA=ON")
+        set(GGML_OPENCL_USE_CLBLAST ON CACHE BOOL "ggml: use CLBlast for OpenCL matmul" FORCE)
+    endif()
+
+    if (GGML_OPENCL_USE_ADRENO_KERNELS)
+        message(STATUS "ggml: disabling Adreno kernels because GGML_OPENCL_LEGACY_NVIDIA=ON")
+        set(GGML_OPENCL_USE_ADRENO_KERNELS OFF CACHE BOOL "ggml: use optimized kernels for Adreno" FORCE)
+    endif()
+
+    if (GGML_OPENCL_TARGET_VERSION STREQUAL "300")
+        message(STATUS "ggml: lowering OpenCL target version to 120 for legacy NVIDIA mode")
+        set(GGML_OPENCL_TARGET_VERSION "120" CACHE STRING "ggml: OpenCL API version to target" FORCE)
+    endif()
+endif()
 
 option(GGML_HEXAGON                         "ggml: enable Hexagon backend"                    OFF)
 set(GGML_HEXAGON_FP32_QUANTIZE_GROUP_SIZE 128 CACHE STRING "ggml: quantize group size (32, 64, or 128)")

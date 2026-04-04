@@ -90,6 +90,69 @@
     { "name": "x64-windows-sycl-release-f16", "inherits": [ "sycl-base", "release", "sycl_f16" ] },
 
     { "name": "x64-windows-vulkan-debug", "inherits": [ "base", "vulkan", "debug" ] },
-    { "name": "x64-windows-vulkan-release", "inherits": [ "base", "vulkan", "release" ] }
+    { "name": "x64-windows-vulkan-release", "inherits": [ "base", "vulkan", "release" ] },
+
+    {
+        "name": "fork-kepler-linux-release",
+        "inherits": [ "base", "x64-linux-gcc", "release" ],
+        "cacheVariables": {
+            "GGML_BLAS": "OFF",
+            "GGML_CUDA": "OFF",
+            "GGML_HIP": "OFF",
+            "GGML_METAL": "OFF",
+            "GGML_MUSA": "OFF",
+            "GGML_OPENCL": "ON",
+            "GGML_OPENCL_LEGACY_NVIDIA": "ON",
+            "GGML_OPENCL_TARGET_VERSION": "120",
+            "GGML_OPENCL_USE_ADRENO_KERNELS": "OFF",
+            "GGML_OPENCL_USE_CLBLAST": "ON",
+            "GGML_OPENVINO": "OFF",
+            "GGML_RPC": "OFF",
+            "GGML_SYCL": "OFF",
+            "GGML_VULKAN": "OFF",
+            "GGML_WEBGPU": "OFF",
+            "LLAMA_BUILD_SERVER": "ON",
+            "LLAMA_BUILD_TESTS": "OFF",
+            "LLAMA_BUILD_TOOLS": "ON",
+            "LLAMA_BUILD_WEBUI": "OFF",
+            "LLAMA_OPENSSL": "OFF"
+        }
+    },
+    {
+        "name": "fork-kepler-windows-release",
+        "inherits": [ "base", "release" ],
+        "cacheVariables": {
+            "GGML_BLAS": "OFF",
+            "GGML_CUDA": "OFF",
+            "GGML_HIP": "OFF",
+            "GGML_METAL": "OFF",
+            "GGML_MUSA": "OFF",
+            "GGML_OPENCL": "ON",
+            "GGML_OPENCL_LEGACY_NVIDIA": "ON",
+            "GGML_OPENCL_TARGET_VERSION": "120",
+            "GGML_OPENCL_USE_ADRENO_KERNELS": "OFF",
+            "GGML_OPENCL_USE_CLBLAST": "ON",
+            "GGML_OPENVINO": "OFF",
+            "GGML_RPC": "OFF",
+            "GGML_SYCL": "OFF",
+            "GGML_VULKAN": "OFF",
+            "GGML_WEBGPU": "OFF",
+            "LLAMA_BUILD_SERVER": "ON",
+            "LLAMA_BUILD_TESTS": "OFF",
+            "LLAMA_BUILD_TOOLS": "ON",
+            "LLAMA_BUILD_WEBUI": "OFF",
+            "LLAMA_OPENSSL": "OFF"
+        }
+    }
+  ],
+  "buildPresets": [
+    {
+      "name": "fork-kepler-linux-release",
+      "configurePreset": "fork-kepler-linux-release"
+    },
+    {
+      "name": "fork-kepler-windows-release",
+      "configurePreset": "fork-kepler-windows-release"
+    }
   ]
 }
