@@ -6623,7 +6623,7 @@ static int64_t ggml_opencl_legacy_pick_col_chunk(const ggml_backend_opencl_conte
     return 0;
 }
 
-static bool ggml_opencl_legacy_col_chunking_feasible(ggml_backend_opencl_context * backend_ctx,
+static bool ggml_opencl_legacy_col_chunking_feasible(const ggml_backend_opencl_context * backend_ctx,
                                                    const ggml_tensor * src0,
                                                    const ggml_tensor_extra_cl * extra0,
                                                    int64_t ne02,
@@ -6820,7 +6820,6 @@ static void ggml_cl_mul_mat_legacy_nvidia(ggml_backend_t backend, const ggml_ten
     const int64_t ne0 = dst->ne[0]; // M
     const int64_t ne1 = dst->ne[1]; // N
     const int64_t ne2 = dst->ne[2]; // = ne12
-    const int64_t ne3 = dst->ne[3]; // = ne13
 
     const int64_t r2 = ne12 / ne02;
     const int64_t r3 = ne13 / ne03;
