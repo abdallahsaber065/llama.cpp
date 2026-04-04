@@ -761,6 +761,7 @@ struct ggml_backend_opencl_context {
 #endif // GGML_OPENCL_USE_ADRENO_KERNELS
 
     void free() {
+        GGML_ASSERT(ref_count > 0);
         ref_count--;
         if (ref_count == 0) {
 #ifdef GGML_OPENCL_PROFILING
@@ -3256,6 +3257,9 @@ static ggml_backend_opencl_context * ggml_cl2_init(ggml_backend_dev_t dev) {
     GGML_ASSERT(dev_ctx->platform);
     GGML_ASSERT(dev_ctx->device);
 
+    // Cached backend_ctx shares the cl_context created in ggml_opencl_probe_devices().
+    // Do not pair this with clReleaseContext on backend teardown unless the entire probe
+    // path can be re-run (see ggml_cl2_free); otherwise the cached object keeps a dead handle.
     if (dev_ctx->backend_ctx) {
         return dev_ctx->backend_ctx;
     }
@@ -3515,20 +3519,45 @@ static ggml_backend_opencl_context * ggml_cl2_init(ggml_backend_dev_t dev) {
 }
 
 static void ggml_cl2_free(ggml_backend_t backend) {
+    if (backend == nullptr || backend->context == nullptr) {
+        return;
+    }
     ggml_backend_opencl_context * ctx = (ggml_backend_opencl_context *) backend->context;
     ctx->free();
 
-    // The CL context is shared by all backends, release it if all backends have been released
+    // The cl_context is shared across every device registered from a single probe (see
+    // ggml_opencl_probe_devices). Releasing it when the last ggml_backend is freed breaks
+    // the next ggml_cl2_init() call: that path returns the *cached* backend_ctx without
+    // re-creating the context, so handles are stale and clReleaseContext can return
+    // CL_INVALID_CONTEXT (-34) on the next teardown (seen on legacy NVIDIA 411.x).
+    //
+    // Default: leak the context until process exit (OS/driver cleanup). Optional explicit
+    // release for debugging only — same-process reload may fail until restart.
+    const char * release_env = getenv("GGML_OPENCL_RELEASE_CONTEXT");
+    if (release_env == nullptr || release_env[0] == '\0' || strcmp(release_env, "0") == 0) {
+        return;
+    }
+
     bool should_release_opencl = true;
     for (auto device : g_ggml_backend_opencl_devices) {
-        ggml_backend_opencl_device_context * ctx_dev = (ggml_backend_opencl_device_context *) device.context;
+        auto * ctx_dev = (ggml_backend_opencl_device_context *) device.context;
+        if (ctx_dev == nullptr || ctx_dev->backend_ctx == nullptr) {
+            continue;
+        }
         if (ctx_dev->backend_ctx->ref_count > 0) {
             should_release_opencl = false;
+            break;
         }
     }
 
-    if (should_release_opencl) {
-        CL_CHECK(clReleaseContext(ctx->context));
+    if (!should_release_opencl || ctx->context == nullptr) {
+        return;
+    }
+
+    cl_int rc = clReleaseContext(ctx->context);
+    if (rc != CL_SUCCESS && rc != CL_INVALID_CONTEXT) {
+        GGML_LOG_ERROR("ggml_opencl: clReleaseContext error %d at %s:%d\n", (int) rc, __FILE__, __LINE__);
+        GGML_ASSERT(0);
     }
 }
 

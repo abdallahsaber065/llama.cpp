@@ -58,6 +58,8 @@ This path does **not** try to run the full modern OpenCL kernel stack. Instead i
 
 **Per-buffer limit:** Many drivers cap a single `cl_mem` allocation (`CL_DEVICE_MAX_MEM_ALLOC_SIZE`, often 1 GiB on older NVIDIA OpenCL). The legacy path dequantizes weights to FP32 for CLBlast; when `ne × sizeof(float)` would exceed a conservative budget derived from that cap, it dequantizes and multiplies **column slices** of `src0` (along `ne01`) instead of one giant buffer. If a tensor cannot be tiled under sub-buffer alignment and dequant kernel work-group constraints, `MUL_MAT` is left for the CPU backend.
 
+**Shared context lifetime (legacy NVIDIA):** One `cl_context` is created for all devices discovered in a single probe. Cached `ggml_backend_opencl_context` objects are reused without re-probing. Calling `clReleaseContext` when the last backend is freed therefore breaks a later open in the same process (stale `cl_context` / `CL_INVALID_CONTEXT` / assert in `CL_CHECK`). By default this fork **does not** release the shared context until process exit. Use `GGML_OPENCL_RELEASE_CONTEXT=1` only for debugging; expect possible failure if you load another model without restarting the process.
+
 Current focus of the compatibility path:
 
 | Area                  | Status |

@@ -30,6 +30,7 @@ Runtime behavior changes:
 - when a single FP32 dequant buffer would exceed `CL_DEVICE_MAX_MEM_ALLOC_SIZE`, `MUL_MAT` is split into column slices (still on GPU) instead of failing with OpenCL allocation errors,
 - unsupported ops stay on CPU through the scheduler fallback path.
 - KV cache for default F16 K/V may stay on CPU on OpenCL 1.2 devices without `cl_khr_fp16`; device selection uses `ggml_backend_dev_description`, which includes the OpenCL C version string.
+- Shared `cl_context` lifetime: the backend does **not** call `clReleaseContext` when the last `ggml_backend` is freed (default). The first probe creates one shared context for all enumerated devices; `ggml_cl2_init` returns a cached `backend_ctx`, so releasing the context during model load/teardown left stale handles and could trigger `CL_INVALID_CONTEXT` (-34) on legacy NVIDIA drivers. The context is released at process exit. Set `GGML_OPENCL_RELEASE_CONTEXT=1` only if you want explicit release in the same process (reload without restart may fail).
 
 ## Supported Build Path
 
