@@ -8,15 +8,21 @@ This fork is intentionally narrowed to one GPU path:
 - legacy NVIDIA / Kepler execution through OpenCL 1.2,
 - CLBlast-backed `MUL_MAT`,
 - a growing set of OpenCL 1.2 FP32 kernels (`legacy_core.cl`) for norms, RoPE, softmax, masks, and elementwise ops,
-- CPU fallback for everything not explicitly validated or outside the supported op matrix (see `docs/backend/OPENCL.md`).
+- scheduler **CPU fallback** only for graph nodes the GPU backend does not accept (`supports_op` false). The dedicated **OpenCL-Kepler** backend targets **upstream OpenCL op parity** (see `docs/backend/opencl-kepler-op-parity-matrix.md`) so full `-ngl` matches stock OpenCL behavior where drivers allow.
 
 The goal is not to preserve upstream's broad backend matrix. The goal is to keep this fork buildable and maintainable for the Quadro `K3100M` class of hardware.
+
+**Reference matrices** (refresh when syncing upstream or changing device caps):
+
+- [Device / limits template](backend/opencl-kepler-device-matrix.md) (`clinfo` checklist)
+- [Op parity checklist vs upstream OpenCL](backend/opencl-kepler-op-parity-matrix.md)
 
 ## What Was Changed
 
 Build-facing changes in this fork:
 
-- added a legacy OpenCL profile with `GGML_OPENCL_LEGACY_NVIDIA=ON`,
+- added **`ggml-opencl-kepler`** (`GGML_OPENCL_KEPLER=ON`, **mutually exclusive** with `GGML_OPENCL=ON`) for a second registered backend name **`OpenCL-Kepler`** / device **`GPUOpenCLKepler`**, compiled as OpenCL 1.2 + CLBlast + legacy NVIDIA defines,
+- retained optional stock **`ggml-opencl`** with `GGML_OPENCL_LEGACY_NVIDIA=ON` for comparison or upstream-style builds,
 - added optional CLBlast integration with `GGML_OPENCL_USE_CLBLAST=ON`,
 - added fork-only CMake presets in `CMakePresets.json`,
 - added a dedicated GitHub Actions workflow in `.github/workflows/fork-kepler-opencl-build.yml`,
@@ -31,7 +37,7 @@ Runtime behavior changes:
 - `GET_ROWS` (embeddings) for F32 / Q4_0 / Q6_K runs on GPU in `legacy_core.cl` so small models like Gemma / Qwen are not stuck on CPU for the gather alone,
 - when a single FP32 dequant buffer would exceed `CL_DEVICE_MAX_MEM_ALLOC_SIZE`, `MUL_MAT` is split into column slices (still on GPU) instead of failing with OpenCL allocation errors,
 - ops beyond CLBlast `MUL_MAT` use the same scheduling matrix as the standard OpenCL backend when the corresponding kernel compiled; unsupported or uncompiled ops stay on CPU (log gaps with `GGML_OPENCL_LEGACY_OP_INVENTORY=1`).
-- OpenCL devices in legacy mode report `[fork_kepler_opencl]` in `ggml_backend_dev_description`. Without `cl_khr_fp16`, `[opencl_legacy_no_fp16]` is added; `llama_context` promotes K/V to F32 and disables Flash Attention so attention uses the decomposed GPU path where supported.
+- Stock OpenCL legacy NVIDIA devices report `[fork_kepler_opencl]` in `ggml_backend_dev_description`. The dedicated Kepler backend reports `[opencl_kepler]` (and `[opencl_legacy_no_fp16]` without `cl_khr_fp16`). `llama_context` promotes K/V to F32 and disables Flash Attention when those tags apply so attention uses the decomposed GPU path where supported.
 - KV cache is no longer forced to CPU solely for F16 on tagged fork devices (F32 K/V is used when the device has no FP16 extension).
 - Shared `cl_context` lifetime: the backend does **not** call `clReleaseContext` when the last `ggml_backend` is freed (default). The first probe creates one shared context for all enumerated devices; `ggml_cl2_init` returns a cached `backend_ctx`, so releasing the context during model load/teardown left stale handles and could trigger `CL_INVALID_CONTEXT` (-34) on legacy NVIDIA drivers. The context is released at process exit. Set `GGML_OPENCL_RELEASE_CONTEXT=1` only if you want explicit release in the same process (reload without restart may fail).
 
@@ -44,7 +50,8 @@ This fork now treats the following as the canonical build configurations:
 
 Both presets force these backend decisions:
 
-- `GGML_OPENCL=ON`
+- `GGML_OPENCL=OFF`
+- `GGML_OPENCL_KEPLER=ON`
 - `GGML_OPENCL_LEGACY_NVIDIA=ON`
 - `GGML_OPENCL_USE_CLBLAST=ON`
 - `GGML_OPENCL_USE_ADRENO_KERNELS=OFF`
@@ -59,30 +66,29 @@ Both presets force these backend decisions:
 
 ## GitHub Actions
 
-The fork now builds through:
+**Only** this workflow is active (`.github/workflows/*.yml`). All other former GitHub workflows are renamed to `*.yml.disabled` so they do not run on push or pull request.
 
-- `.github/workflows/fork-kepler-opencl-build.yml`
+- **Workflow:** `.github/workflows/fork-kepler-opencl-build.yml`
+- **Triggers:** `push` to `master` (filtered paths), and `workflow_dispatch`. There is **no** `pull_request` trigger on this workflow.
+- **Jobs:** Linux + Windows Kepler OpenCL preset builds only.
+- **Releases:** On every successful `master` push, the workflow creates a **GitHub Release** with a **unique tag**: `kepler-opencl-r<run_number>-a<run_attempt>-<7-char-sha>` (incremental run number, higher `run_attempt` on re-runs, commit id). Attachments: zipped Linux and Windows artifact trees.
 
-What it does automatically:
+After pulling upstream, if new `.github/workflows/*.yml` files appear, disable them by renaming to `*.yml.disabled` unless you intentionally want them.
 
-1. Builds Linux artifacts on `ubuntu-22.04`.
-2. Builds Windows artifacts on `windows-2022`.
-3. Configures both jobs through the fork-only presets.
-4. Fetches CLBlast automatically through CMake when it is not already installed.
-5. Uploads the built binaries as workflow artifacts.
+**Merge pins:** See [fork-merge-pins.md](fork-merge-pins.md) and root `.gitattributes` for paths that prefer the fork’s version when merging upstream.
 
 What it does not try to do:
 
+- run Python lint/type workflows or other repo automation (disabled),
 - benchmark unrelated backends,
 - build CUDA, Vulkan, SYCL, Metal, HIP, MUSA, WebGPU, or OpenVINO targets,
-- produce upstream release packaging formats,
 - validate GPU execution on GitHub-hosted hardware.
 
 ## How To Use Built Artifacts
 
 After a successful workflow run:
 
-1. Download the `fork-kepler-opencl-windows` artifact for your machine.
+1. Download a release asset (`fork-kepler-opencl-windows-<tag>.zip`) from **Releases**, or grab the `fork-kepler-opencl-windows` artifact from the workflow run.
 2. Extract the archive.
 3. Keep the executable and any bundled `.dll` files in the same folder.
 4. Make sure the NVIDIA driver on the target machine still exposes OpenCL for the Kepler GPU.
@@ -103,7 +109,9 @@ Use this checklist whenever you sync from upstream:
 2. Re-run `.github/workflows/fork-kepler-opencl-build.yml`.
 3. Inspect conflicts and behavior in these files first:
    - `ggml/src/ggml-opencl/ggml-opencl.cpp`
+   - `ggml/src/ggml-opencl-kepler/ggml-opencl-kepler.cpp`
    - `ggml/src/ggml-opencl/CMakeLists.txt`
+   - `ggml/src/ggml-opencl-kepler/CMakeLists.txt`
    - `ggml/CMakeLists.txt`
    - `CMakePresets.json`
 4. Re-check whether upstream changed:
@@ -112,6 +120,7 @@ Use this checklist whenever you sync from upstream:
    - OpenCL buffer initialization,
    - build option names or backend registration.
 5. Update `docs/backend/OPENCL.md` and `CHANGELOG.md` if the fork path changes again.
+6. Re-check [fork-merge-pins.md](fork-merge-pins.md): disable any new upstream workflows, refresh `merge=ours` paths if you add more fork-owned files.
 
 ## Maintenance Policy For This Fork
 

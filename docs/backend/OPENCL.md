@@ -25,13 +25,17 @@ The llama.cpp OpenCL backend is designed to enable llama.cpp on **Qualcomm Adren
 
 For the Kepler-focused fork workflow, GitHub Actions pipeline, and upstream-sync checklist, see [Kepler OpenCL Fork Guide](/docs/kepler-opencl-fork.md).
 
+**Dedicated Kepler backend:** This fork can build `**ggml-opencl-kepler`** (`GGML_OPENCL_KEPLER=ON`) instead of stock `**ggml-opencl**` (`GGML_OPENCL=OFF`). The two options are **mutually exclusive** at configure time. Device matrix template: [opencl-kepler-device-matrix.md](opencl-kepler-device-matrix.md). Model-blind op parity checklist: [opencl-kepler-op-parity-matrix.md](opencl-kepler-op-parity-matrix.md).
+
 ## OS
 
-| OS      | Status  | Verified                                       |
-|---------|---------|------------------------------------------------|
-| Android | Support | Snapdragon 8 Gen 3, Snapdragon 8 Elite         |
-| Windows | Support | Windows 11 Arm64 with Snapdragon X Elite       |
-| Linux   | Support | Ubuntu 22.04 WSL2 with Intel 12700H            |
+
+| OS      | Status  | Verified                                 |
+| ------- | ------- | ---------------------------------------- |
+| Android | Support | Snapdragon 8 Gen 3, Snapdragon 8 Elite   |
+| Windows | Support | Windows 11 Arm64 with Snapdragon X Elite |
+| Linux   | Support | Ubuntu 22.04 WSL2 with Intel 12700H      |
+
 
 ## Hardware
 
@@ -39,14 +43,16 @@ For the Kepler-focused fork workflow, GitHub Actions pipeline, and upstream-sync
 
 **Verified devices**
 
-| Adreno GPU                           | Status  |
-|:------------------------------------:|:-------:|
-| Adreno 750 (Snapdragon 8 Gen 3)      | Support |
-| Adreno 830 (Snapdragon 8 Elite)      | Support |
-| Adreno X85 (Snapdragon X Elite)      | Support |
+
+| Adreno GPU                      | Status  |
+| ------------------------------- | ------- |
+| Adreno 750 (Snapdragon 8 Gen 3) | Support |
+| Adreno 830 (Snapdragon 8 Elite) | Support |
+| Adreno X85 (Snapdragon X Elite) | Support |
+
 
 > A6x GPUs with a recent driver and compiler are supported; they are usually found in IoT platforms.
-However, A6x GPUs in phones are likely not supported due to the outdated driver and compiler.
+> However, A6x GPUs in phones are likely not supported due to the outdated driver and compiler.
 
 ### Legacy NVIDIA / Kepler
 
@@ -54,61 +60,70 @@ This fork also includes a conservative compatibility path for older NVIDIA OpenC
 
 **Default platform (legacy builds):** If `GGML_OPENCL_PLATFORM` is unset and both Intel and NVIDIA OpenCL ICDs are present, the fork **prefers NVIDIA** so the first enumerated iGPU is not chosen by mistake (Intel OpenCL 1.2 fails the non-legacy OpenCL 2.0 gate and previously resulted in no usable GPU).
 
-This path still loads CLBlast, `set_rows`, and a small **OpenCL 1.2 / FP32 / subgroup-free** program (`legacy_core.cl`) for common transformer ops. It then runs the same **`load_cl_kernels` pass** as the modern backend, compiled for OpenCL C 1.2: programs that fail to build are **skipped** (logged, null program/kernel) instead of aborting the process, so whatever your driver accepts can run on GPU. Scheduling uses the **standard** `supports_op` rules for those ops; `MUL_MAT` remains on the CLBlast + legacy GEMM path when `ggml_opencl_can_mul_mat_legacy` allows it. Anything the driver cannot compile or the backend does not advertise stays on CPU via the scheduler.
+This path still loads CLBlast, `set_rows`, and a small **OpenCL 1.2 / FP32 / subgroup-free** program (`legacy_core.cl`) for common transformer ops. It then runs the same `**load_cl_kernels` pass** as the modern backend, compiled for OpenCL C 1.2: programs that fail to build are **skipped** (logged, null program/kernel) instead of aborting the process, so whatever your driver accepts can run on GPU. Scheduling uses the **standard** `supports_op` rules for those ops; `MUL_MAT` remains on the CLBlast + legacy GEMM path when `ggml_opencl_can_mul_mat_legacy` allows it. Anything the driver cannot compile or the backend does not advertise stays on CPU via the scheduler.
 
 **CLBlast scope:** CLBlast provides BLAS-style routines (for example `GEMM`). Custom kernels cover the non-BLAS ops below; other `GGML_OP` types remain unsupported on GPU until implemented.
 
 **Legacy core ops (FP32, contiguous where noted):**
 
-| Op | Notes |
-|----|--------|
-| `MUL_MAT` | CLBlast + dequant when it succeeds; otherwise native FP32 GEMM in `legacy_core.cl` (same GPU, slower). Set `GGML_OPENCL_LEGACY_NATIVE_GEMM=1` to skip CLBlast. Init runs `clblast::FillCache`. |
-| `GET_ROWS` | F32 / Q4_0 / Q6_K source rows → F32 dst; indices `I32`; contiguous; `ne[0]` divisible by 32 (Q4_0) or 256 (Q6_K). |
-| `SET_ROWS` | Existing path; F16 only with `cl_khr_fp16` |
-| `RMS_NORM` | F32, contiguous |
-| `ROPE` | Normal / NeoX only; not MROPE, vision, or IMROPE |
-| `SOFT_MAX` | F32 activations; mask tensor must be F32 (no F16 mask) |
-| `DIAG_MASK_INF` | F32 |
-| `ADD`, `MUL` | Same-shape F32 |
-| `SCALE` | F32 |
-| `CPY` | F32→F32, same shape, contiguous |
-| `DUP`, `CONT` | F32, same shape as source, contiguous |
-| `UNARY` | `SILU`, `GELU` (tanh approximation) |
 
-**Device tags:** Legacy NVIDIA init appends `[fork_kepler_opencl]` to `ggml_backend_dev_description`. Without `cl_khr_fp16`, `[opencl_legacy_no_fp16]` is also appended; `llama_context` then uses F32 K/V and turns off Flash Attention so graphs use the decomposed attention + `SOFT_MAX` path.
+| Op              | Notes                                                                                                                                                                                          |
+| --------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `MUL_MAT`       | CLBlast + dequant when it succeeds; otherwise native FP32 GEMM in `legacy_core.cl` (same GPU, slower). Set `GGML_OPENCL_LEGACY_NATIVE_GEMM=1` to skip CLBlast. Init runs `clblast::FillCache`. |
+| `GET_ROWS`      | F32 / Q4_0 / Q6_K source rows → F32 dst; indices `I32`; contiguous; `ne[0]` divisible by 32 (Q4_0) or 256 (Q6_K).                                                                              |
+| `SET_ROWS`      | Existing path; F16 only with `cl_khr_fp16`                                                                                                                                                     |
+| `RMS_NORM`      | F32, contiguous                                                                                                                                                                                |
+| `ROPE`          | Normal / NeoX only; not MROPE, vision, or IMROPE                                                                                                                                               |
+| `SOFT_MAX`      | F32 activations; mask tensor must be F32 (no F16 mask)                                                                                                                                         |
+| `DIAG_MASK_INF` | F32                                                                                                                                                                                            |
+| `ADD`, `MUL`    | Same-shape F32                                                                                                                                                                                 |
+| `SCALE`         | F32                                                                                                                                                                                            |
+| `CPY`           | F32→F32, same shape, contiguous                                                                                                                                                                |
+| `DUP`, `CONT`   | F32, same shape as source, contiguous                                                                                                                                                          |
+| `UNARY`         | `SILU`, `GELU` (tanh approximation)                                                                                                                                                            |
+
+
+**Device tags:** Legacy NVIDIA init on stock OpenCL appends `[fork_kepler_opencl]` to `ggml_backend_dev_description`. The dedicated **OpenCL-Kepler** backend appends `[opencl_kepler]` (same F16/KV behavior). Without `cl_khr_fp16`, `[opencl_legacy_no_fp16]` is also appended; `llama_context` then uses F32 K/V and turns off Flash Attention so graphs use the decomposed attention + `SOFT_MAX` path.
 
 **Inventory:** Set `GGML_OPENCL_LEGACY_OP_INVENTORY=1` to log unsupported ops when the legacy backend declines a node (useful for model-by-model gap analysis).
 
 **Per-buffer limit:** Many drivers cap a single `cl_mem` allocation (`CL_DEVICE_MAX_MEM_ALLOC_SIZE`, often 1 GiB on older NVIDIA OpenCL). The legacy path dequantizes weights to FP32 for CLBlast; when `ne × sizeof(float)` would exceed a conservative budget derived from that cap, it dequantizes and multiplies **column slices** of `src0` (along `ne01`) instead of one giant buffer. If a tensor cannot be tiled under sub-buffer alignment and dequant kernel work-group constraints, `MUL_MAT` is left for the CPU backend.
 
+**Program release on Kepler:** During the optional full `load_cl_kernels` pass, failed compiles leave a null `cl_program`; drivers must not abort when releasing those handles. Legacy init uses a safe `clReleaseProgram` path (null skip, no assert) because some NVIDIA 411-era stacks return `CL_INVALID_PROGRAM` for `clReleaseProgram(NULL)`.
+
 **Shared context lifetime (legacy NVIDIA):** One `cl_context` is created for all devices discovered in a single probe. Cached `ggml_backend_opencl_context` objects are reused without re-probing. Calling `clReleaseContext` when the last backend is freed therefore breaks a later open in the same process (stale `cl_context` / `CL_INVALID_CONTEXT` / assert in `CL_CHECK`). By default this fork **does not** release the shared context until process exit. Use `GGML_OPENCL_RELEASE_CONTEXT=1` only for debugging; expect possible failure if you load another model without restarting the process.
 
 Current focus of the compatibility path:
 
-| Area                  | Status |
-|:---------------------:|:------:|
-| OpenCL 1.2 init path  | Support |
-| CLBlast GEMM backend  | Support |
-| `MUL_MAT` offload     | Support |
-| Legacy core F32 ops   | Partial (see table above); plus optional standard kernels if they compile |
-| `MUL_MAT_ID` offload  | CPU fallback |
-| Subgroup kernels      | Disabled |
 
-The OpenCL backend reports `ggml_backend_dev_description` as `device name (OpenCL C version)`, matching the init log line, plus optional fork tags (see above). Older logic that keyed off `OpenCL 1.2` in the description for KV placement is bypassed when `[fork_kepler_opencl]` is present.
+| Area                 | Status                                                                    |
+| -------------------- | ------------------------------------------------------------------------- |
+| OpenCL 1.2 init path | Support                                                                   |
+| CLBlast GEMM backend | Support                                                                   |
+| `MUL_MAT` offload    | Support                                                                   |
+| Legacy core F32 ops  | Partial (see table above); plus optional standard kernels if they compile |
+| `MUL_MAT_ID` offload | GPU when `supports_op` / kernels match upstream OpenCL matrix             |
+| Subgroup kernels     | Disabled                                                                  |
+
+
+The OpenCL backend reports `ggml_backend_dev_description` as `device name (OpenCL C version)`, matching the init log line, plus optional fork tags (see above). Older logic that keyed off `OpenCL 1.2` in the description for KV placement is bypassed when `[fork_kepler_opencl]` or `[opencl_kepler]` is present (or when the device name is `GPUOpenCLKepler`).
 
 ## DataType Supports
 
-| DataType               | Status                     |
-|:----------------------:|:--------------------------:|
-| Q4_0                   | Support                    |
-| Q6_K                   | Support, but not optimized |
-| Q8_0                   | Support                    |
-| MXFP4                  | Support                    |
+
+| DataType | Status                     |
+| -------- | -------------------------- |
+| Q4_0     | Support                    |
+| Q6_K     | Support, but not optimized |
+| Q8_0     | Support                    |
+| MXFP4    | Support                    |
+
 
 For the legacy NVIDIA / Kepler compatibility path, the current GPU-offloaded `MUL_MAT` path is limited to:
 
-| DataType | Status |
-|:--------:|:------:|
+
+| DataType | Status  |
+| -------- | ------- |
 | F32      | Support |
 | F16      | Support |
 | Q4_0     | Support |
@@ -116,6 +131,7 @@ For the legacy NVIDIA / Kepler compatibility path, the current GPU-offloaded `MU
 | Q8_0     | Support |
 | Q4_K     | Support |
 | Q6_K     | Support |
+
 
 ## Model Preparation
 
@@ -144,19 +160,35 @@ Hence, using the default `MXFP4_MOE` quantization (see the link above) is recomm
 
 The OpenCL backend has the following CMake options that control the behavior of the backend.
 
-| CMake options                     | Default value  | Description                               |
-|:---------------------------------:|:--------------:|:------------------------------------------|
-| `GGML_OPENCL_EMBED_KERNELS`       | `ON`           | Embed OpenCL kernels into the executable. |
-| `GGML_OPENCL_USE_ADRENO_KERNELS`  | `ON`           | Use kernels optimized for Adreno.         |
-| `GGML_OPENCL_USE_CLBLAST`         | `OFF`          | Use CLBlast for OpenCL matmul.            |
-| `GGML_OPENCL_LEGACY_NVIDIA`       | `OFF`          | Enable the OpenCL 1.2 / CLBlast compatibility path for old NVIDIA GPUs. |
+
+| CMake options                    | Default value | Description                                                                                 |
+| -------------------------------- | ------------- | ------------------------------------------------------------------------------------------- |
+| `GGML_OPENCL`                    | `OFF`         | Build stock `ggml-opencl` backend.                                                          |
+| `GGML_OPENCL_KEPLER`             | `OFF`         | Build `ggml-opencl-kepler` (Kepler / OpenCL 1.2). **Not** combinable with `GGML_OPENCL=ON`. |
+| `GGML_OPENCL_EMBED_KERNELS`      | `ON`          | Embed OpenCL kernels into the executable.                                                   |
+| `GGML_OPENCL_USE_ADRENO_KERNELS` | `ON`          | Use kernels optimized for Adreno.                                                           |
+| `GGML_OPENCL_USE_CLBLAST`        | `OFF`         | Use CLBlast for OpenCL matmul.                                                              |
+| `GGML_OPENCL_LEGACY_NVIDIA`      | `OFF`         | Enable the OpenCL 1.2 / CLBlast compatibility path for old NVIDIA GPUs.                     |
+
 
 ### Legacy NVIDIA / Kepler Build
 
-Use the following options for the legacy NVIDIA compatibility profile:
+**Fork presets** use the dedicated backend (no dual OpenCL registration):
 
 ```powershell
 cmake -B build-kepler -G Ninja `
+  -DGGML_OPENCL=OFF `
+  -DGGML_OPENCL_KEPLER=ON `
+  -DGGML_OPENCL_LEGACY_NVIDIA=ON `
+  -DGGML_OPENCL_USE_CLBLAST=ON `
+  -DGGML_OPENCL_USE_ADRENO_KERNELS=OFF `
+  -DGGML_OPENCL_TARGET_VERSION=120
+```
+
+Optional stock OpenCL + legacy NVIDIA (upstream-style single backend name `GPUOpenCL`):
+
+```powershell
+cmake -B build-opencl-legacy -G Ninja `
   -DGGML_OPENCL=ON `
   -DGGML_OPENCL_LEGACY_NVIDIA=ON `
   -DGGML_OPENCL_USE_CLBLAST=ON `
@@ -168,7 +200,7 @@ Notes:
 
 - `GGML_OPENCL_LEGACY_NVIDIA=ON` forces the backend onto the OpenCL 1.2-safe CLBlast path.
 - This mode intentionally disables the current subgroup-heavy OpenCL kernels.
-- Unsupported operations continue on CPU through the normal multi-backend scheduler.
+- Unsupported operations continue on CPU through the normal multi-backend scheduler for nodes the GPU backend declines (`supports_op` false). The Kepler backend aims for **upstream OpenCL op parity** so full `-ngl` stays on GPU where the stock OpenCL backend would (see [opencl-kepler-op-parity-matrix.md](opencl-kepler-op-parity-matrix.md)).
 - Large `MUL_MAT` weights (for example very wide embedding tables) may use chunked GPU dequant + multiple CLBlast GEMM calls so each staging buffer stays under `CL_DEVICE_MAX_MEM_ALLOC_SIZE`.
 - The fork-specific GitHub Actions workflow uses the `fork-kepler-linux-release` and `fork-kepler-windows-release` presets from `CMakePresets.json`.
 
@@ -176,10 +208,10 @@ Notes:
 
 Ubuntu 22.04 is used for targeting Android. Make sure the following tools are accessible from command line,
 
-* Git
-* CMake 3.29
-* Ninja
-* Python3
+- Git
+- CMake 3.29
+- Ninja
+- Python3
 
 ### I. Setup Environment
 
@@ -197,7 +229,7 @@ rm -rf commandlinetools-linux-8512546_latest.zip
 yes | ~/android-sdk/cmdline-tools/latest/bin/sdkmanager "ndk;26.3.11579264"
 ```
 
-2. **Install OpenCL Headers and Library**
+1. **Install OpenCL Headers and Library**
 
 ```sh
 mkdir -p ~/dev/llm
@@ -245,13 +277,13 @@ ninja
 
 A Snapdragon X Elite device with Windows 11 Arm64 is used. Make sure the following tools are accessible from command line,
 
-* Git
-* CMake 3.29
-* Clang 19
-* Ninja
-* Visual Studio 2022
-* Powershell 7
-* Python
+- Git
+- CMake 3.29
+- Clang 19
+- Ninja
+- Visual Studio 2022
+- Powershell 7
+- Python
 
 Visual Studio provides necessary headers and libraries although it is not directly used for building.
 Alternatively, Visual Studio Build Tools can be installed instead of the full Visual Studio.
@@ -361,7 +393,7 @@ ninja
 
 - Flash attention does not always improve performance.
 - Currently OpenCL backend works on A6xx GPUs with recent drivers and compilers (usually found in IoT platforms).
-  However, it does not work on A6xx GPUs found in phones with old drivers and compilers.
+However, it does not work on A6xx GPUs found in phones with old drivers and compilers.
 - The legacy NVIDIA / Kepler mode is intentionally conservative and currently offloads only the validated `MUL_MAT` path.
 
 ## TODO
@@ -369,3 +401,4 @@ ninja
 - Optimization for Q6_K
 - Support and optimization for Q4_K
 - Improve flash attention
+

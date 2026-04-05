@@ -2,3 +2,8 @@
 # Git's pack-file delta compression still works (byte-level), but this prevents
 # git diff from printing the entire minified file on every change.
 tools/server/public/index.html -diff
+
+# Fork: when merging upstream, prefer this fork's version (see docs/fork-merge-pins.md).
+.github/workflows/fork-kepler-opencl-build.yml merge=ours
+CMakePresets.json merge=ours
+AGENTS.md merge=ours
