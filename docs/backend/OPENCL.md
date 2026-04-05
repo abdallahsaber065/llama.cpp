@@ -62,6 +62,8 @@ This fork also includes a conservative compatibility path for older NVIDIA OpenC
 
 This path still loads CLBlast, `set_rows`, and a small **OpenCL 1.2 / FP32 / subgroup-free** program (`legacy_core.cl`) for common transformer ops. It then runs the same `**load_cl_kernels` pass** as the modern backend, compiled for OpenCL C 1.2: programs that fail to build are **skipped** (logged, null program/kernel) instead of aborting the process, so whatever your driver accepts can run on GPU. Scheduling uses the **standard** `supports_op` rules for those ops; `MUL_MAT` remains on the CLBlast + legacy GEMM path when `ggml_opencl_can_mul_mat_legacy` allows it. Anything the driver cannot compile or the backend does not advertise stays on CPU via the scheduler.
 
+**`GGML_OP_FLASH_ATTN_EXT`:** After init, this op is only considered supported on GPU if the corresponding **flash-attention kernel** for the tensor head sizes `(dk, dv)` and sequence layout (`n_q == 1` uses the `*_q1` kernels) actually **compiled** (non-null `cl_kernel`). Failed program builds must not leave `supports_op` true for that variant, or dispatch would assert.
+
 **CLBlast scope:** CLBlast provides BLAS-style routines (for example `GEMM`). Custom kernels cover the non-BLAS ops below; other `GGML_OP` types remain unsupported on GPU until implemented.
 
 **Legacy core ops (FP32, contiguous where noted):**

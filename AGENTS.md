@@ -33,6 +33,16 @@ Treat these as the canonical configurations for this fork:
 
 Do not optimize this fork around CUDA, Vulkan, SYCL, Metal, HIP, MUSA, WebGPU, or OpenVINO unless the user explicitly asks.
 
+## OpenCL-Kepler / Quadro K3100M rules
+
+When changing the Kepler path, keep **scheduler claims** aligned with **what actually compiled** on the device:
+
+1. **Canonical binary**: Prefer validating behavior against **`fork-kepler-linux-release`** / **`fork-kepler-windows-release`** (backend name **`OpenCL-Kepler`**, device **`GPUOpenCLKepler`**). Stock **`GGML_OPENCL`** builds are secondary for this fork’s stated goal.
+2. **Relaxed `load_cl_kernels`**: On failed builds, `build_program_from_source` returns **`nullptr`**. Never call **`clCreateKernel`** on a null program. Pair every optional kernel with a **`supports_op`** (or dispatch) check so graph scheduling does not route to a missing kernel (avoids `GGML_ASSERT` / undefined behavior).
+3. **Typical K3100M caps**: Often **no `cl_khr_fp16`**, **no `cl_khr_subgroups`**, and **~1 GiB `CL_DEVICE_MAX_MEM_ALLOC_SIZE`**. Long **`kernel compile error`** logs during init can be **normal** on this stack; the process should continue and leave **null** kernels for failed programs.
+4. **`GGML_OP_FLASH_ATTN_EXT`**: Only treat as supported when the matching per-`(dk,dv)` / `n_q` flash kernel handle is **non-null** after init. FP16 flash sources are **not** built when **`fp16_support`** is false.
+5. **“GPU-only” vs fork default**: The fork still allows **CPU fallback** when `supports_op` is false (conservative). Maximizing GPU fraction on Kepler means **more OpenCL 1.2–safe kernels** and accurate **`supports_op`**, not forcing dispatch without a compiled kernel.
+
 ## Most Important Files
 
 When debugging or extending the fork, inspect these first:

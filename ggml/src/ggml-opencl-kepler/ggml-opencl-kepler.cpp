@@ -2193,29 +2193,57 @@ static void load_cl_kernels(ggml_backend_opencl_kepler_context *backend_ctx, ggm
                     " -D BLOCK_M=" + std::to_string(bm) +
                     " -D BLOCK_N=" + std::to_string(bn);
 
-                cl_program prog_f16 = build_program_from_source(backend_ctx->context, backend_ctx->device, kernel_src_f16.c_str(), OPTS);
-                cl_kernel k_f16, k_f16_q1;
-                CL_CHECK((k_f16 = clCreateKernel(prog_f16, "flash_attn_f16", &err), err));
-                CL_CHECK((k_f16_q1 = clCreateKernel(prog_f16, "flash_attn_f16_q1", &err), err));
+                cl_kernel k_f16 = nullptr, k_f16_q1 = nullptr;
+                if (backend_ctx->fp16_support) {
+                    cl_program prog_f16 = build_program_from_source(backend_ctx->context, backend_ctx->device, kernel_src_f16.c_str(), OPTS);
+                    if (prog_f16) {
+                        k_f16 = clCreateKernel(prog_f16, "flash_attn_f16", &err);
+                        if (err != CL_SUCCESS) {
+                            k_f16 = nullptr;
+                        }
+                        k_f16_q1 = clCreateKernel(prog_f16, "flash_attn_f16_q1", &err);
+                        if (err != CL_SUCCESS) {
+                            k_f16_q1 = nullptr;
+                        }
+                    }
+                    ggml_opencl_safe_release_program(prog_f16);
+                }
                 backend_ctx->kernels_flash_attn_f16[{dk, dv}] = k_f16;
                 backend_ctx->kernels_flash_attn_f16_q1[{dk, dv}] = k_f16_q1;
-                ggml_opencl_safe_release_program(prog_f16);
 
                 cl_program prog_f32 = build_program_from_source(backend_ctx->context, backend_ctx->device, kernel_src_f32.c_str(), OPTS);
-                cl_kernel k_f32, k_f32_q1;
-                CL_CHECK((k_f32 = clCreateKernel(prog_f32, "flash_attn_f32", &err), err));
-                CL_CHECK((k_f32_q1 = clCreateKernel(prog_f32, "flash_attn_f32_q1", &err), err));
+                cl_kernel k_f32 = nullptr, k_f32_q1 = nullptr;
+                if (prog_f32) {
+                    k_f32 = clCreateKernel(prog_f32, "flash_attn_f32", &err);
+                    if (err != CL_SUCCESS) {
+                        k_f32 = nullptr;
+                    }
+                    k_f32_q1 = clCreateKernel(prog_f32, "flash_attn_f32_q1", &err);
+                    if (err != CL_SUCCESS) {
+                        k_f32_q1 = nullptr;
+                    }
+                }
+                ggml_opencl_safe_release_program(prog_f32);
                 backend_ctx->kernels_flash_attn_f32[{dk, dv}] = k_f32;
                 backend_ctx->kernels_flash_attn_f32_q1[{dk, dv}] = k_f32_q1;
-                ggml_opencl_safe_release_program(prog_f32);
 
-                cl_program prog_f32_f16 = build_program_from_source(backend_ctx->context, backend_ctx->device, kernel_src_f32_f16.c_str(), OPTS);
-                cl_kernel k_f32_f16, k_f32_f16_q1;
-                CL_CHECK((k_f32_f16 = clCreateKernel(prog_f32_f16, "flash_attn_f32_f16", &err), err));
-                CL_CHECK((k_f32_f16_q1 = clCreateKernel(prog_f32_f16, "flash_attn_f32_f16_q1", &err), err));
+                cl_kernel k_f32_f16 = nullptr, k_f32_f16_q1 = nullptr;
+                if (backend_ctx->fp16_support) {
+                    cl_program prog_f32_f16 = build_program_from_source(backend_ctx->context, backend_ctx->device, kernel_src_f32_f16.c_str(), OPTS);
+                    if (prog_f32_f16) {
+                        k_f32_f16 = clCreateKernel(prog_f32_f16, "flash_attn_f32_f16", &err);
+                        if (err != CL_SUCCESS) {
+                            k_f32_f16 = nullptr;
+                        }
+                        k_f32_f16_q1 = clCreateKernel(prog_f32_f16, "flash_attn_f32_f16_q1", &err);
+                        if (err != CL_SUCCESS) {
+                            k_f32_f16_q1 = nullptr;
+                        }
+                    }
+                    ggml_opencl_safe_release_program(prog_f32_f16);
+                }
                 backend_ctx->kernels_flash_attn_f32_f16[{dk, dv}] = k_f32_f16;
                 backend_ctx->kernels_flash_attn_f32_f16_q1[{dk, dv}] = k_f32_f16_q1;
-                ggml_opencl_safe_release_program(prog_f32_f16);
 
                 backend_ctx->kernels_flash_attn_bm[{dk, dv}] = bm;
                 backend_ctx->kernels_flash_attn_bn[{dk, dv}] = bn;
@@ -4908,7 +4936,33 @@ static bool ggml_opencl_supports_op_standard(ggml_backend_dev_t dev, const struc
                 const bool is_f32_f16 = q->type == GGML_TYPE_F32 && k->type == GGML_TYPE_F16 &&
                                         v->type == GGML_TYPE_F16 && op->type == GGML_TYPE_F32;
 
-                return is_f32_f32 || is_f16_f16 || is_f32_f16;
+                if (!(is_f32_f32 || is_f16_f16 || is_f32_f16)) {
+                    return false;
+                }
+
+                const std::pair<int, int> dk_dv = { dk, dv };
+                const int n_q = q->ne[1];
+                auto flash_kernel_ok = [&](const std::map<std::pair<int, int>, cl_kernel> & m) -> bool {
+                    const auto it = m.find(dk_dv);
+                    return it != m.end() && it->second != nullptr;
+                };
+
+                if (n_q == 1) {
+                    if (is_f32_f16) {
+                        return flash_kernel_ok(backend_ctx->kernels_flash_attn_f32_f16_q1);
+                    }
+                    if (is_f16_f16) {
+                        return flash_kernel_ok(backend_ctx->kernels_flash_attn_f16_q1);
+                    }
+                    return flash_kernel_ok(backend_ctx->kernels_flash_attn_f32_q1);
+                }
+                if (is_f32_f16) {
+                    return flash_kernel_ok(backend_ctx->kernels_flash_attn_f32_f16);
+                }
+                if (is_f16_f16) {
+                    return flash_kernel_ok(backend_ctx->kernels_flash_attn_f16);
+                }
+                return flash_kernel_ok(backend_ctx->kernels_flash_attn_f32);
             }
         default:
             return false;
