@@ -22,9 +22,11 @@ Treat these as the canonical configurations for this fork:
   - `fork-kepler-linux-release`
   - `fork-kepler-windows-release`
 - Workflow:
-  - `.github/workflows/fork-kepler-opencl-build.yml`
-- Backend mode:
-  - `GGML_OPENCL=ON`
+  - `.github/workflows/fork-kepler-opencl-build.yml` (sole active workflow; others are `*.yml.disabled`)
+  - Automatic **GitHub Release** on each successful `master` push with tag `kepler-opencl-r<run>-a<attempt>-<sha7>`
+- Backend mode (fork presets):
+  - `GGML_OPENCL=OFF`
+  - `GGML_OPENCL_KEPLER=ON`
   - `GGML_OPENCL_LEGACY_NVIDIA=ON`
   - `GGML_OPENCL_USE_CLBLAST=ON`
   - `GGML_OPENCL_TARGET_VERSION=120`
@@ -36,7 +38,9 @@ Do not optimize this fork around CUDA, Vulkan, SYCL, Metal, HIP, MUSA, WebGPU, o
 When debugging or extending the fork, inspect these first:
 
 - `ggml/src/ggml-opencl/ggml-opencl.cpp`
+- `ggml/src/ggml-opencl-kepler/ggml-opencl-kepler.cpp`
 - `ggml/src/ggml-opencl/CMakeLists.txt`
+- `ggml/src/ggml-opencl-kepler/CMakeLists.txt`
 - `ggml/src/ggml-opencl/kernels/*.cl`
 - `ggml/CMakeLists.txt`
 - `CMakePresets.json`
@@ -68,6 +72,7 @@ Minimum required follow-up:
 - Update `docs/kepler-opencl-fork.md` if the fork workflow, scope, releases, or supported path changed.
 - Update `docs/backend/OPENCL.md` if runtime behavior, supported devices, supported dtypes, build flags, or usage instructions changed.
 - Update `.github/workflows/fork-kepler-opencl-build.yml` if build/release packaging expectations changed.
+- Update `docs/fork-merge-pins.md` or `.gitattributes` if fork merge-pin paths or CI disable policy changed.
 - Update `AGENTS.md` if the persistent fork workflow or maintenance rules changed.
 
 Do not leave code behavior and docs out of sync.

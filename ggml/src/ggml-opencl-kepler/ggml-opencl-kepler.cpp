@@ -7,7 +7,7 @@
 #pragma GCC diagnostic ignored "-Wgnu-anonymous-struct"
 #endif
 
-#include "ggml-opencl.h"
+#include "ggml-opencl-kepler.h"
 #include "ggml-backend.h"
 #include "ggml-impl.h"
 #include "ggml-backend-impl.h"
@@ -58,8 +58,8 @@
 bool ggml_cl_compute_forward(ggml_backend_t backend, struct ggml_tensor * tensor);
 
 #ifdef GGML_OPENCL_USE_CLBLAST
-struct ggml_backend_opencl_context;
-static bool ggml_opencl_can_mul_mat_legacy(const ggml_backend_opencl_context * backend_ctx,
+struct ggml_backend_opencl_kepler_context;
+static bool ggml_opencl_can_mul_mat_legacy(const ggml_backend_opencl_kepler_context * backend_ctx,
                                            const struct ggml_tensor * src0,
                                            const struct ggml_tensor * src1,
                                            const struct ggml_tensor * dst);
@@ -369,10 +369,10 @@ static void populateProfilingInfo(
     info.output_size[3] = tensor->ne[3];
 }
 
-struct ggml_backend_opencl_context;
+struct ggml_backend_opencl_kepler_context;
 
 // backend device context
-struct ggml_backend_opencl_device_context {
+struct ggml_backend_opencl_kepler_device_context {
     cl_platform_id platform;
     std::string platform_name;
 
@@ -383,16 +383,16 @@ struct ggml_backend_opencl_device_context {
     std::string    device_description;
 
     // Initialized by ggml_cl2_init().
-    ggml_backend_opencl_context * backend_ctx = nullptr;
+    ggml_backend_opencl_kepler_context * backend_ctx = nullptr;
 
-    // Initialized by ggml_backend_opencl_device_get_buffer_type()
+    // Initialized by ggml_backend_opencl_kepler_device_get_buffer_type()
     ggml_backend_buffer_type buffer_type;
 
     cl_context context = nullptr;
 };
 
 // backend context
-struct ggml_backend_opencl_context {
+struct ggml_backend_opencl_kepler_context {
     int ref_count;
 
     cl_device_id device;
@@ -790,7 +790,7 @@ struct ggml_backend_opencl_context {
 };
 
 // All registered devices with a default device in the front.
-static std::vector<ggml_backend_device> g_ggml_backend_opencl_devices;
+static std::vector<ggml_backend_device> g_ggml_backend_opencl_kepler_devices;
 
 inline std::string read_file(const std::string &path) {
   std::ifstream ifs(path);
@@ -806,7 +806,7 @@ inline std::string read_file(const std::string &path) {
 }
 
 // When set, failed program creation/build returns nullptr instead of aborting (optional kernels on legacy NVIDIA).
-static thread_local bool g_ggml_opencl_relaxed_program_build = false;
+extern thread_local bool g_ggml_opencl_relaxed_program_build;
 
 static cl_program build_program_from_source(cl_context ctx, cl_device_id dev, const char* program_buffer, const std::string &compile_opts) {
     cl_program p;
@@ -1015,11 +1015,11 @@ __kernel void dequantize_block_q6_K(__global const struct block_q6_K * x, __glob
 }
 )CLC";
 
-static bool ggml_opencl_use_legacy_nvidia(const ggml_backend_opencl_context * backend_ctx) {
+static bool ggml_opencl_use_legacy_nvidia(const ggml_backend_opencl_kepler_context * backend_ctx) {
     return backend_ctx != nullptr && backend_ctx->legacy_nvidia;
 }
 
-static cl_kernel ggml_opencl_clblast_dequant_kernel(const ggml_backend_opencl_context * backend_ctx, ggml_type type) {
+static cl_kernel ggml_opencl_clblast_dequant_kernel(const ggml_backend_opencl_kepler_context * backend_ctx, ggml_type type) {
     switch (type) {
         case GGML_TYPE_F16:  return backend_ctx->kernel_clblast_convert_row_f16;
         case GGML_TYPE_Q4_0: return backend_ctx->kernel_clblast_dequantize_row_q4_0;
@@ -1047,7 +1047,7 @@ static size_t ggml_opencl_clblast_local_size(ggml_type type) {
     }
 }
 
-static void load_clblast_compat_kernels(ggml_backend_opencl_context * backend_ctx) {
+static void load_clblast_compat_kernels(ggml_backend_opencl_kepler_context * backend_ctx) {
     cl_int err;
     const std::string compile_opts = "-cl-std=CL1.2 -cl-mad-enable -cl-fast-relaxed-math";
 
@@ -1065,7 +1065,7 @@ static void load_clblast_compat_kernels(ggml_backend_opencl_context * backend_ct
     CL_CHECK((backend_ctx->kernel_clblast_dequantize_block_q6_K = clCreateKernel(backend_ctx->program_clblast_compat, "dequantize_block_q6_K", &err), err));
 }
 
-static void load_cl_set_rows_kernels(ggml_backend_opencl_context * backend_ctx, const std::string & compile_opts) {
+static void load_cl_set_rows_kernels(ggml_backend_opencl_kepler_context * backend_ctx, const std::string & compile_opts) {
     cl_int err;
     std::string set_rows_compile_opts = compile_opts;
 
@@ -1094,7 +1094,7 @@ static void load_cl_set_rows_kernels(ggml_backend_opencl_context * backend_ctx, 
     }
 }
 
-static void load_legacy_core_kernels(ggml_backend_opencl_context * backend_ctx, const std::string & compile_opts) {
+static void load_legacy_core_kernels(ggml_backend_opencl_kepler_context * backend_ctx, const std::string & compile_opts) {
     cl_int err;
 #ifdef GGML_OPENCL_EMBED_KERNELS
     const std::string kernel_src {
@@ -1147,13 +1147,13 @@ static bool ggml_opencl_legacy_same_shape_elementwise(const ggml_tensor * op) {
 }
 
 #else
-static bool ggml_opencl_use_legacy_nvidia(const ggml_backend_opencl_context * backend_ctx) {
+static bool ggml_opencl_use_legacy_nvidia(const ggml_backend_opencl_kepler_context * backend_ctx) {
     GGML_UNUSED(backend_ctx);
     return false;
 }
 #endif
 
-static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx, ggml_cl_version opencl_c_version) {
+static void load_cl_kernels(ggml_backend_opencl_kepler_context *backend_ctx, ggml_cl_version opencl_c_version) {
     cl_int err;
 
     const bool prev_relaxed = g_ggml_opencl_relaxed_program_build;
@@ -3105,14 +3105,14 @@ static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx, ggml_cl_ve
     g_ggml_opencl_relaxed_program_build = prev_relaxed;
 }
 
-// XXX static ggml_backend_opencl_context * ggml_cl2_init(ggml_backend_dev_t dev) {
+// XXX static ggml_backend_opencl_kepler_context * ggml_cl2_init(ggml_backend_dev_t dev) {
 // XXX    static bool initialized = false;
-// XXX    static ggml_backend_opencl_context *backend_ctx = nullptr;
+// XXX    static ggml_backend_opencl_kepler_context *backend_ctx = nullptr;
 
-static ggml_backend_opencl_context * ggml_cl2_init(ggml_backend_dev_t dev);
+static ggml_backend_opencl_kepler_context * ggml_cl2_init(ggml_backend_dev_t dev);
 
 namespace /* anonymous */ {
-extern struct ggml_backend_device_i ggml_backend_opencl_device_i;
+extern struct ggml_backend_device_i ggml_backend_opencl_kepler_device_i;
 }
 
 // Look for available and suitable devices.
@@ -3327,9 +3327,17 @@ static std::vector<ggml_backend_device> ggml_opencl_probe_devices(ggml_backend_r
         (shared_context = clCreateContext(properties, device_ids.size(), device_ids.data(), NULL, NULL, &err), err));
 
     for (auto dev = candidate_devices, dev_end = candidate_devices + n_candidate_devices; dev != dev_end; dev++) {
+#ifdef GGML_OPENCL_KEPLER_BUILD
+        const bool plat_nvidia = strstr(dev->platform->name, "NVIDIA") != nullptr ||
+            strstr(dev->platform->vendor, "NVIDIA") != nullptr;
+        if (!plat_nvidia || dev->type != CL_DEVICE_TYPE_GPU) {
+            GGML_LOG_INFO("ggml_opencl_kepler: skipping device '%s' (non-NVIDIA OpenCL platform or non-GPU)\n", dev->name);
+            continue;
+        }
+#endif
         GGML_LOG_INFO("\nggml_opencl: device: '%s (%s)'\n", dev->name, dev->version);
 
-        auto dev_ctx = std::unique_ptr<ggml_backend_opencl_device_context>(new ggml_backend_opencl_device_context{
+        auto dev_ctx = std::unique_ptr<ggml_backend_opencl_kepler_device_context>(new ggml_backend_opencl_kepler_device_context{
             /*.platform         =*/dev->platform->id,
             /*.platform_name    =*/dev->platform->name,
             /*.device           =*/dev->id,
@@ -3344,7 +3352,7 @@ static std::vector<ggml_backend_device> ggml_opencl_probe_devices(ggml_backend_r
         dev_ctx->device_description = dev_ctx->device_name + " (" + dev_ctx->device_version + ")";
 
         found_devices.push_back(ggml_backend_device{
-            /* .iface   = */ ggml_backend_opencl_device_i,
+            /* .iface   = */ ggml_backend_opencl_kepler_device_i,
             /* .reg     = */ reg,
             /* .context = */ dev_ctx.get(),
         });
@@ -3355,9 +3363,9 @@ static std::vector<ggml_backend_device> ggml_opencl_probe_devices(ggml_backend_r
             continue;
         }
         {
-            auto * dctx = (ggml_backend_opencl_device_context *) found_devices.back().context;
+            auto * dctx = (ggml_backend_opencl_kepler_device_context *) found_devices.back().context;
             if (dctx->backend_ctx && dctx->backend_ctx->legacy_nvidia) {
-                dctx->device_description += " [fork_kepler_opencl]";
+                dctx->device_description += " [opencl_kepler]";
                 if (!dctx->backend_ctx->fp16_support) {
                     dctx->device_description += " [opencl_legacy_no_fp16]";
                 }
@@ -3368,7 +3376,7 @@ static std::vector<ggml_backend_device> ggml_opencl_probe_devices(ggml_backend_r
     }
 
     if (found_devices.size()) {
-        auto * dev_ctx = static_cast<ggml_backend_opencl_device_context *>(found_devices.front().context);
+        auto * dev_ctx = static_cast<ggml_backend_opencl_kepler_device_context *>(found_devices.front().context);
         GGML_LOG_INFO("ggml_opencl: default device: '%s (%s)'\n", dev_ctx->device_name.c_str(),
                       dev_ctx->device_version.c_str());
 
@@ -3382,11 +3390,11 @@ static std::vector<ggml_backend_device> ggml_opencl_probe_devices(ggml_backend_r
 }
 
 // Initialize device if it is supported (returns nullptr if it is not).
-static ggml_backend_opencl_context * ggml_cl2_init(ggml_backend_dev_t dev) {
+static ggml_backend_opencl_kepler_context * ggml_cl2_init(ggml_backend_dev_t dev) {
     GGML_ASSERT(dev);
     GGML_ASSERT(dev->context);
 
-    ggml_backend_opencl_device_context * dev_ctx = (ggml_backend_opencl_device_context *) dev->context;
+    ggml_backend_opencl_kepler_device_context * dev_ctx = (ggml_backend_opencl_kepler_device_context *) dev->context;
     GGML_ASSERT(dev_ctx->platform);
     GGML_ASSERT(dev_ctx->device);
 
@@ -3397,11 +3405,11 @@ static ggml_backend_opencl_context * ggml_cl2_init(ggml_backend_dev_t dev) {
         return dev_ctx->backend_ctx;
     }
 
-    auto backend_ctx        = std::make_unique<ggml_backend_opencl_context>();
+    auto backend_ctx        = std::make_unique<ggml_backend_opencl_kepler_context>();
     backend_ctx->device     = dev_ctx->device;
     backend_ctx->gpu_family = GPU_FAMILY::UNKNOWN;
 
-    // ref_count get increased in ggml_backend_opencl_device_init
+    // ref_count get increased in ggml_backend_opencl_kepler_device_init
     // This function is also used to retrieve backend context, so we don't want
     // to increase ref_count for each call. We only want to increase ref_count
     // when the associated device is initialized
@@ -3661,7 +3669,7 @@ static void ggml_cl2_free(ggml_backend_t backend) {
     if (backend == nullptr || backend->context == nullptr) {
         return;
     }
-    ggml_backend_opencl_context * ctx = (ggml_backend_opencl_context *) backend->context;
+    ggml_backend_opencl_kepler_context * ctx = (ggml_backend_opencl_kepler_context *) backend->context;
     ctx->free();
 
     // The cl_context is shared across every device registered from a single probe (see
@@ -3678,8 +3686,8 @@ static void ggml_cl2_free(ggml_backend_t backend) {
     }
 
     bool should_release_opencl = true;
-    for (auto device : g_ggml_backend_opencl_devices) {
-        auto * ctx_dev = (ggml_backend_opencl_device_context *) device.context;
+    for (auto device : g_ggml_backend_opencl_kepler_devices) {
+        auto * ctx_dev = (ggml_backend_opencl_kepler_device_context *) device.context;
         if (ctx_dev == nullptr || ctx_dev->backend_ctx == nullptr) {
             continue;
         }
@@ -3702,7 +3710,7 @@ static void ggml_cl2_free(ggml_backend_t backend) {
 
 #ifdef GGML_OPENCL_USE_ADRENO_KERNELS
 static void transpose_2d(
-    ggml_backend_opencl_context * backend_ctx,
+    ggml_backend_opencl_kepler_context * backend_ctx,
     cl_kernel kernel,
     cl_mem src, cl_mem dst, size_t size,
     cl_int stride, cl_int rows,
@@ -3746,7 +3754,7 @@ static void transpose_2d(
 }
 
 static void transpose_2d_as_8b(
-    ggml_backend_opencl_context * backend_ctx,
+    ggml_backend_opencl_kepler_context * backend_ctx,
     cl_mem src, cl_mem dst, size_t size,
     cl_int stride, cl_int rows,
     bool blocking = true
@@ -3756,7 +3764,7 @@ static void transpose_2d_as_8b(
 }
 
 static void transpose_2d_as_16b(
-    ggml_backend_opencl_context * backend_ctx,
+    ggml_backend_opencl_kepler_context * backend_ctx,
     cl_mem src, cl_mem dst, size_t size,
     cl_int stride, cl_int rows,
     bool blocking = true
@@ -3766,7 +3774,7 @@ static void transpose_2d_as_16b(
 }
 
 static void transpose_2d_as_32b(
-    ggml_backend_opencl_context * backend_ctx,
+    ggml_backend_opencl_kepler_context * backend_ctx,
     cl_mem src, cl_mem dst, size_t size,
     cl_int stride, cl_int rows,
     bool blocking = true
@@ -3809,7 +3817,7 @@ static void ggml_cl_legacy_diag_mask_inf(ggml_backend_t backend, const ggml_tens
     const int ne01 = src0->ne[1];
     const int ne02 = src0->ne[2];
 
-    ggml_backend_opencl_context * backend_ctx = (ggml_backend_opencl_context *) backend->context;
+    ggml_backend_opencl_kepler_context * backend_ctx = (ggml_backend_opencl_kepler_context *) backend->context;
     ggml_tensor_extra_cl * extra0 = (ggml_tensor_extra_cl *) src0->extra;
     ggml_tensor_extra_cl * extrad = (ggml_tensor_extra_cl *) dst->extra;
     const cl_ulong offset0 = extra0->offset + src0->view_offs;
@@ -3843,7 +3851,7 @@ static void ggml_cl_legacy_rms_norm(ggml_backend_t backend, const ggml_tensor * 
     const cl_ulong nb02 = src0->nb[2];
     const cl_ulong nb03 = src0->nb[3];
 
-    ggml_backend_opencl_context * backend_ctx = (ggml_backend_opencl_context *) backend->context;
+    ggml_backend_opencl_kepler_context * backend_ctx = (ggml_backend_opencl_kepler_context *) backend->context;
     ggml_tensor_extra_cl * extra0 = (ggml_tensor_extra_cl *) src0->extra;
     ggml_tensor_extra_cl * extrad = (ggml_tensor_extra_cl *) dst->extra;
     const cl_ulong offset0 = extra0->offset + src0->view_offs;
@@ -3870,7 +3878,7 @@ static void ggml_cl_legacy_rms_norm(ggml_backend_t backend, const ggml_tensor * 
 static void ggml_cl_legacy_add(ggml_backend_t backend, const ggml_tensor * src0, const ggml_tensor * src1, ggml_tensor * dst) {
     GGML_ASSERT(src0 && src0->extra && src1 && src1->extra && dst && dst->extra);
     const int n = (int) ggml_nelements(dst);
-    ggml_backend_opencl_context * backend_ctx = (ggml_backend_opencl_context *) backend->context;
+    ggml_backend_opencl_kepler_context * backend_ctx = (ggml_backend_opencl_kepler_context *) backend->context;
     ggml_tensor_extra_cl * e0 = (ggml_tensor_extra_cl *) src0->extra;
     ggml_tensor_extra_cl * e1 = (ggml_tensor_extra_cl *) src1->extra;
     ggml_tensor_extra_cl * ed = (ggml_tensor_extra_cl *) dst->extra;
@@ -3892,7 +3900,7 @@ static void ggml_cl_legacy_add(ggml_backend_t backend, const ggml_tensor * src0,
 static void ggml_cl_legacy_mul(ggml_backend_t backend, const ggml_tensor * src0, const ggml_tensor * src1, ggml_tensor * dst) {
     GGML_ASSERT(src0 && src0->extra && src1 && src1->extra && dst && dst->extra);
     const int n = (int) ggml_nelements(dst);
-    ggml_backend_opencl_context * backend_ctx = (ggml_backend_opencl_context *) backend->context;
+    ggml_backend_opencl_kepler_context * backend_ctx = (ggml_backend_opencl_kepler_context *) backend->context;
     ggml_tensor_extra_cl * e0 = (ggml_tensor_extra_cl *) src0->extra;
     ggml_tensor_extra_cl * e1 = (ggml_tensor_extra_cl *) src1->extra;
     ggml_tensor_extra_cl * ed = (ggml_tensor_extra_cl *) dst->extra;
@@ -3919,7 +3927,7 @@ static void ggml_cl_legacy_scale(ggml_backend_t backend, const ggml_tensor * src
     memcpy(&scale, ((const int32_t *) dst->op_params) + 0, sizeof(float));
     memcpy(&bias,  ((const int32_t *) dst->op_params) + 1, sizeof(float));
     const int n = (int) ggml_nelements(dst);
-    ggml_backend_opencl_context * backend_ctx = (ggml_backend_opencl_context *) backend->context;
+    ggml_backend_opencl_kepler_context * backend_ctx = (ggml_backend_opencl_kepler_context *) backend->context;
     ggml_tensor_extra_cl * e0 = (ggml_tensor_extra_cl *) src0->extra;
     ggml_tensor_extra_cl * ed = (ggml_tensor_extra_cl *) dst->extra;
     const cl_ulong o0 = e0->offset + src0->view_offs;
@@ -3940,7 +3948,7 @@ static void ggml_cl_legacy_cpy_f32(ggml_backend_t backend, const ggml_tensor * s
     GGML_ASSERT(src0 && src0->extra && dst && dst->extra);
     UNUSED(src1);
     const int n = (int) ggml_nelements(dst);
-    ggml_backend_opencl_context * backend_ctx = (ggml_backend_opencl_context *) backend->context;
+    ggml_backend_opencl_kepler_context * backend_ctx = (ggml_backend_opencl_kepler_context *) backend->context;
     ggml_tensor_extra_cl * e0 = (ggml_tensor_extra_cl *) src0->extra;
     ggml_tensor_extra_cl * ed = (ggml_tensor_extra_cl *) dst->extra;
     const cl_ulong o0 = e0->offset + src0->view_offs;
@@ -3959,7 +3967,7 @@ static void ggml_cl_legacy_unary(ggml_backend_t backend, ggml_tensor * dst) {
     const ggml_tensor * src0 = dst->src[0];
     GGML_ASSERT(src0 && src0->extra && dst && dst->extra);
     const int n = (int) ggml_nelements(dst);
-    ggml_backend_opencl_context * backend_ctx = (ggml_backend_opencl_context *) backend->context;
+    ggml_backend_opencl_kepler_context * backend_ctx = (ggml_backend_opencl_kepler_context *) backend->context;
     ggml_tensor_extra_cl * e0 = (ggml_tensor_extra_cl *) src0->extra;
     ggml_tensor_extra_cl * ed = (ggml_tensor_extra_cl *) dst->extra;
     cl_kernel k = nullptr;
@@ -3989,7 +3997,7 @@ static void ggml_cl_legacy_soft_max(ggml_backend_t backend, const ggml_tensor * 
         GGML_ASSERT(src2->extra);
     }
 
-    ggml_backend_opencl_context * backend_ctx = (ggml_backend_opencl_context *) backend->context;
+    ggml_backend_opencl_kepler_context * backend_ctx = (ggml_backend_opencl_kepler_context *) backend->context;
     ggml_tensor_extra_cl * extra0 = (ggml_tensor_extra_cl *) src0->extra;
     ggml_tensor_extra_cl * extrad = (ggml_tensor_extra_cl *) dst->extra;
     ggml_tensor_extra_cl * extra1 = src1 ? (ggml_tensor_extra_cl *) src1->extra : nullptr;
@@ -4066,7 +4074,7 @@ static void ggml_cl_legacy_soft_max(ggml_backend_t backend, const ggml_tensor * 
 static void ggml_cl_legacy_rope(ggml_backend_t backend, const ggml_tensor * src0, const ggml_tensor * src1, ggml_tensor * dst) {
     GGML_ASSERT(src0 && src0->extra && src1 && src1->extra && dst && dst->extra);
 
-    ggml_backend_opencl_context * backend_ctx = (ggml_backend_opencl_context *) backend->context;
+    ggml_backend_opencl_kepler_context * backend_ctx = (ggml_backend_opencl_kepler_context *) backend->context;
     ggml_tensor_extra_cl * extra0 = (ggml_tensor_extra_cl *) src0->extra;
     ggml_tensor_extra_cl * extra1 = (ggml_tensor_extra_cl *) src1->extra;
     ggml_tensor_extra_cl * extrad = (ggml_tensor_extra_cl *) dst->extra;
@@ -4204,7 +4212,7 @@ struct ggml_tensor_extra_cl_q4_0 {
             d = nullptr;
         }
         // Currently, q_img and d_img are only initialized when SMALL_ALLOC is
-        // enabled. They point to the images in ggml_backend_opencl_buffer_context.
+        // enabled. They point to the images in ggml_backend_opencl_kepler_buffer_context.
         // So, there is no need to release them here.
         // TODO: initialize them for non SMALL_PATH path, or remove them.
         q_img = nullptr;
@@ -4255,7 +4263,7 @@ struct ggml_tensor_extra_cl_q4_1 {
             m = nullptr;
         }
         // Currently, q_img and d_img are only initialized when SMALL_ALLOC is
-        // enabled. They point to the images in ggml_backend_opencl_buffer_context.
+        // enabled. They point to the images in ggml_backend_opencl_kepler_buffer_context.
         // So, there is no need to release them here.
         // TODO: initialize them for non SMALL_PATH path, or remove them.
         q_img = nullptr;
@@ -4430,17 +4438,17 @@ struct ggml_tensor_extra_cl_q6_K {
 //
 // backend
 //
-static const char * ggml_backend_opencl_name(ggml_backend_t backend) {
+static const char * ggml_backend_opencl_kepler_name(ggml_backend_t backend) {
     return "OpenCL";
 
     UNUSED(backend);
 }
 
-static void ggml_backend_opencl_free(ggml_backend_t backend) {
+static void ggml_backend_opencl_kepler_free(ggml_backend_t backend) {
     ggml_cl2_free(backend);
 }
 
-static void ggml_backend_opencl_set_tensor_async(ggml_backend_t backend, ggml_tensor * tensor, const void * data, size_t offset, size_t size) {
+static void ggml_backend_opencl_kepler_set_tensor_async(ggml_backend_t backend, ggml_tensor * tensor, const void * data, size_t offset, size_t size) {
     GGML_UNUSED(backend);
     GGML_UNUSED(tensor);
     GGML_UNUSED(data);
@@ -4448,7 +4456,7 @@ static void ggml_backend_opencl_set_tensor_async(ggml_backend_t backend, ggml_te
     GGML_UNUSED(size);
 }
 
-static void ggml_backend_opencl_get_tensor_async(ggml_backend_t backend, const ggml_tensor * tensor, void * data, size_t offset, size_t size) {
+static void ggml_backend_opencl_kepler_get_tensor_async(ggml_backend_t backend, const ggml_tensor * tensor, void * data, size_t offset, size_t size) {
     GGML_UNUSED(backend);
     GGML_UNUSED(tensor);
     GGML_UNUSED(data);
@@ -4456,15 +4464,15 @@ static void ggml_backend_opencl_get_tensor_async(ggml_backend_t backend, const g
     GGML_UNUSED(size);
 }
 
-static bool ggml_backend_opencl_cpy_tensor_async(ggml_backend_t backend, const ggml_tensor * src, ggml_tensor * dst) {
+static bool ggml_backend_opencl_kepler_cpy_tensor_async(ggml_backend_t backend, const ggml_tensor * src, ggml_tensor * dst) {
     GGML_UNUSED(backend);
     GGML_UNUSED(src);
     GGML_UNUSED(dst);
     return false;
 }
 
-static void ggml_backend_opencl_synchronize(ggml_backend_t backend) {
-    auto * backend_ctx = static_cast<ggml_backend_opencl_context *>(backend->context);
+static void ggml_backend_opencl_kepler_synchronize(ggml_backend_t backend) {
+    auto * backend_ctx = static_cast<ggml_backend_opencl_kepler_context *>(backend->context);
 
     cl_event evt;
     CL_CHECK(clEnqueueBarrierWithWaitList(backend_ctx->queue, 0, nullptr, &evt));
@@ -4475,14 +4483,14 @@ static void ggml_backend_opencl_synchronize(ggml_backend_t backend) {
 // Synchronizes the 'backend_ctx's device with others so that commands
 // enqueued to it won't start until commands in the other devices have
 // completed.
-static void sync_with_other_backends(ggml_backend_opencl_context * backend_ctx) {
-    if (g_ggml_backend_opencl_devices.size() < 2)
+static void sync_with_other_backends(ggml_backend_opencl_kepler_context * backend_ctx) {
+    if (g_ggml_backend_opencl_kepler_devices.size() < 2)
       return; // No other devices to synchronize with.
 
     std::vector<cl_event> events;
-    events.reserve(g_ggml_backend_opencl_devices.size());
+    events.reserve(g_ggml_backend_opencl_kepler_devices.size());
 
-    for (ggml_backend_device & backend_dev : g_ggml_backend_opencl_devices) {
+    for (ggml_backend_device & backend_dev : g_ggml_backend_opencl_kepler_devices) {
         auto * other_backend_ctx = ggml_cl2_init(&backend_dev);
         if (backend_ctx != other_backend_ctx) {
             cl_event ev;
@@ -4499,7 +4507,7 @@ static void sync_with_other_backends(ggml_backend_opencl_context * backend_ctx) 
 }
 
 static void sync_with_other_backends(ggml_backend_t backend) {
-    auto * backend_ctx = static_cast<ggml_backend_opencl_context *>(backend->context);
+    auto * backend_ctx = static_cast<ggml_backend_opencl_kepler_context *>(backend->context);
     sync_with_other_backends(backend_ctx);
 }
 
@@ -4574,8 +4582,8 @@ static void ggml_opencl_op_rms_norm_fused(ggml_backend_t backend, ggml_tensor * 
 static void ggml_opencl_op_norm_fused(ggml_backend_t backend, ggml_tensor * norm_tensor, ggml_tensor * mul_tensor, ggml_tensor * add_tensor);
 static void ggml_opencl_op_group_norm_fused(ggml_backend_t backend, ggml_tensor * gn_tensor, ggml_tensor * mul_tensor, ggml_tensor * add_tensor);
 
-static ggml_status ggml_backend_opencl_graph_compute(ggml_backend_t backend, ggml_cgraph * cgraph) {
-    ggml_backend_opencl_context *backend_ctx = (ggml_backend_opencl_context *)backend->context;
+static ggml_status ggml_backend_opencl_kepler_graph_compute(ggml_backend_t backend, ggml_cgraph * cgraph) {
+    ggml_backend_opencl_kepler_context *backend_ctx = (ggml_backend_opencl_kepler_context *)backend->context;
 
     for (int i = 0; i < cgraph->n_nodes; i++) {
         ggml_tensor * node = cgraph->nodes[i];
@@ -4620,8 +4628,8 @@ static ggml_status ggml_backend_opencl_graph_compute(ggml_backend_t backend, ggm
 }
 
 static bool ggml_opencl_supports_op_standard(ggml_backend_dev_t dev, const struct ggml_tensor * op) {
-    ggml_backend_opencl_device_context * dev_ctx     = (ggml_backend_opencl_device_context *)dev->context;
-    ggml_backend_opencl_context *        backend_ctx = dev_ctx->backend_ctx;
+    ggml_backend_opencl_kepler_device_context * dev_ctx     = (ggml_backend_opencl_kepler_device_context *)dev->context;
+    ggml_backend_opencl_kepler_context *        backend_ctx = dev_ctx->backend_ctx;
     switch (op->op) {
         case GGML_OP_NONE:
             return true;
@@ -4902,8 +4910,8 @@ static bool ggml_opencl_supports_op_standard(ggml_backend_dev_t dev, const struc
 
 
 static bool ggml_opencl_supports_op(ggml_backend_dev_t dev, const struct ggml_tensor * op) {
-    ggml_backend_opencl_device_context * dev_ctx     = (ggml_backend_opencl_device_context *)dev->context;
-    ggml_backend_opencl_context *        backend_ctx = dev_ctx->backend_ctx;
+    ggml_backend_opencl_kepler_device_context * dev_ctx     = (ggml_backend_opencl_kepler_device_context *)dev->context;
+    ggml_backend_opencl_kepler_context *        backend_ctx = dev_ctx->backend_ctx;
 
     if (ggml_opencl_use_legacy_nvidia(backend_ctx)) {
 #ifdef GGML_OPENCL_USE_CLBLAST
@@ -4933,37 +4941,37 @@ static bool ggml_opencl_supports_op(ggml_backend_dev_t dev, const struct ggml_te
 }
 
 // Forward declaration - implementation appears later in the file.
-static const char * ggml_backend_opencl_buffer_type_get_name(ggml_backend_buffer_type_t buffer_type);
+static const char * ggml_backend_opencl_kepler_buffer_type_get_name(ggml_backend_buffer_type_t buffer_type);
 
-static ggml_guid_t ggml_backend_opencl_guid() {
-    static ggml_guid guid = { 0xde, 0xe0, 0x70, 0xa2, 0x73, 0x4e, 0x4d, 0xbc, 0xb0, 0xc7, 0x4f, 0xd4, 0x6d, 0x4e, 0x90, 0xfe };
+static ggml_guid_t ggml_backend_opencl_kepler_guid() {
+    static ggml_guid guid = { 0xde, 0xe1, 0x70, 0xa2, 0x73, 0x4e, 0x4d, 0xbc, 0xb0, 0xc7, 0x4f, 0xd4, 0x6d, 0x4e, 0x90, 0xfe };
     return &guid;
 }
 
-static ggml_backend_i ggml_backend_opencl_i = {
-    /* .get_name                = */ ggml_backend_opencl_name,
-    /* .free                    = */ ggml_backend_opencl_free,
-    /* .set_tensor_async        = */ NULL,  /* ggml_backend_opencl_set_tensor_async */
-    /* .get_tensor_async        = */ NULL,  /* ggml_backend_opencl_get_tensor_async */
-    /* .cpy_tensor_async        = */ NULL,  /* ggml_backend_opencl_cpy_tensor_async */
-    /* .synchronize             = */ ggml_backend_opencl_synchronize,
+static ggml_backend_i ggml_backend_opencl_kepler_i = {
+    /* .get_name                = */ ggml_backend_opencl_kepler_name,
+    /* .free                    = */ ggml_backend_opencl_kepler_free,
+    /* .set_tensor_async        = */ NULL,  /* ggml_backend_opencl_kepler_set_tensor_async */
+    /* .get_tensor_async        = */ NULL,  /* ggml_backend_opencl_kepler_get_tensor_async */
+    /* .cpy_tensor_async        = */ NULL,  /* ggml_backend_opencl_kepler_cpy_tensor_async */
+    /* .synchronize             = */ ggml_backend_opencl_kepler_synchronize,
     /* .graph_plan_create       = */ NULL,
     /* .graph_plan_free         = */ NULL,
     /* .graph_plan_update       = */ NULL,
     /* .graph_plan_compute      = */ NULL,
-    /* .graph_compute           = */ ggml_backend_opencl_graph_compute,
+    /* .graph_compute           = */ ggml_backend_opencl_kepler_graph_compute,
     /* .event_record            = */ NULL,
     /* .event_wait              = */ NULL,
     /* .graph_optimize          = */ NULL,
 };
 
-ggml_backend_t ggml_backend_opencl_init(void) {
-    ggml_backend_dev_t dev = ggml_backend_reg_dev_get(ggml_backend_opencl_reg(), 0);
-    ggml_backend_opencl_context *backend_ctx = ggml_cl2_init(dev);
+ggml_backend_t ggml_backend_opencl_kepler_init(void) {
+    ggml_backend_dev_t dev = ggml_backend_reg_dev_get(ggml_backend_opencl_kepler_reg(), 0);
+    ggml_backend_opencl_kepler_context *backend_ctx = ggml_cl2_init(dev);
 
     ggml_backend_t backend = new ggml_backend {
-        /* .guid    = */ ggml_backend_opencl_guid(),
-        /* .iface   = */ ggml_backend_opencl_i,
+        /* .guid    = */ ggml_backend_opencl_kepler_guid(),
+        /* .iface   = */ ggml_backend_opencl_kepler_i,
         /* .device  = */ dev,
         /* .context = */ backend_ctx
     };
@@ -4971,25 +4979,25 @@ ggml_backend_t ggml_backend_opencl_init(void) {
     return backend;
 }
 
-bool ggml_backend_is_opencl(ggml_backend_t backend) {
-    return backend && backend->iface.get_name == ggml_backend_opencl_name;
+bool ggml_backend_is_opencl_kepler(ggml_backend_t backend) {
+    return backend && backend->iface.get_name == ggml_backend_opencl_kepler_name;
 }
 
 //
 // buffer
 //
-struct ggml_backend_opencl_buffer_context {
+struct ggml_backend_opencl_kepler_buffer_context {
     // A buffer context can hold multiple cl_mem objects. This is for flattening
     // quantized weights and should be used with GGML_OPENCL_SMALL_ALLOC where
     // each tensor is allocated a separate buffer. When flattening is enabled
     // with small allocation, each tensor is backed by two cl_mem objects (for
     // quants and scales) packed into a backend_opencl_buffer.
-    ggml_backend_opencl_buffer_context(cl_mem buf)
-        : name("OpenCL") {
+    ggml_backend_opencl_kepler_buffer_context(cl_mem buf)
+        : name("OpenCL-Kepler") {
         buffer.push_back(buf);
     }
 
-    ~ggml_backend_opencl_buffer_context() {
+    ~ggml_backend_opencl_kepler_buffer_context() {
         for (cl_mem buf : buffer) {
             CL_CHECK(clReleaseMemObject(buf));
         }
@@ -5214,18 +5222,18 @@ struct ggml_backend_opencl_buffer_context {
     std::string name;
 };
 
-static void ggml_backend_opencl_buffer_free_buffer(ggml_backend_buffer_t buffer) {
-    ggml_backend_opencl_buffer_context * ctx = (ggml_backend_opencl_buffer_context *) buffer->context;
+static void ggml_backend_opencl_kepler_buffer_free_buffer(ggml_backend_buffer_t buffer) {
+    ggml_backend_opencl_kepler_buffer_context * ctx = (ggml_backend_opencl_kepler_buffer_context *) buffer->context;
     delete ctx;
 }
 
-static void * ggml_backend_opencl_buffer_get_base(ggml_backend_buffer_t buffer) {
-    ggml_backend_opencl_context * backend_ctx = ggml_cl2_init(buffer->buft->device);
+static void * ggml_backend_opencl_kepler_buffer_get_base(ggml_backend_buffer_t buffer) {
+    ggml_backend_opencl_kepler_context * backend_ctx = ggml_cl2_init(buffer->buft->device);
     return (void *) (uintptr_t) backend_ctx->alignment;
 }
 
-static enum ggml_status ggml_backend_opencl_buffer_init_tensor(ggml_backend_buffer_t buffer, ggml_tensor * tensor) {
-    ggml_backend_opencl_buffer_context * ctx = (ggml_backend_opencl_buffer_context *) buffer->context;
+static enum ggml_status ggml_backend_opencl_kepler_buffer_init_tensor(ggml_backend_buffer_t buffer, ggml_tensor * tensor) {
+    ggml_backend_opencl_kepler_buffer_context * ctx = (ggml_backend_opencl_kepler_buffer_context *) buffer->context;
 
     ggml_cl2_init(buffer->buft->device);
 
@@ -5254,7 +5262,7 @@ static enum ggml_status ggml_backend_opencl_buffer_init_tensor(ggml_backend_buff
         tensor->extra = view_extra;
     } else {
         {
-            size_t offset = (char *) tensor->data - (char *) ggml_backend_opencl_buffer_get_base(buffer);
+            size_t offset = (char *) tensor->data - (char *) ggml_backend_opencl_kepler_buffer_get_base(buffer);
 
             ggml_tensor_extra_cl * extra = ctx->ggml_opencl_alloc_temp_tensor_extra();
             extra->offset = offset;
@@ -5269,7 +5277,7 @@ static enum ggml_status ggml_backend_opencl_buffer_init_tensor(ggml_backend_buff
 
 // The optimized gemm and gemv kernels are used for large matrices without batch.
 // tensor is the quantized weights matrix.
-inline bool use_adreno_kernels(const ggml_backend_opencl_context *backend_ctx, const ggml_tensor *tensor) {
+inline bool use_adreno_kernels(const ggml_backend_opencl_kepler_context *backend_ctx, const ggml_tensor *tensor) {
     int64_t threshold_ne0 = 512;
     int64_t threshold_ne1 = 512;
     if (!backend_ctx->adreno_cl_compiler_version.newer_than_or_same(E031, 38, 11, 0) &&
@@ -5281,13 +5289,13 @@ inline bool use_adreno_kernels(const ggml_backend_opencl_context *backend_ctx, c
             tensor->ne[2] == 1 && tensor->ne[3] == 1;
 }
 
-inline bool use_adreno_moe_kernels(const ggml_backend_opencl_context *backend_ctx, const ggml_tensor *tensor) {
+inline bool use_adreno_moe_kernels(const ggml_backend_opencl_kepler_context *backend_ctx, const ggml_tensor *tensor) {
     GGML_UNUSED(backend_ctx);
     int ne01 = tensor->ne[1];
     return ((strstr(tensor->name, "ffn") != NULL) || (strstr(tensor->name, "as") != NULL)) && (ne01 % 64 == 0);
 }
 
-inline bool enable_adreno_trans_weight(const ggml_backend_opencl_context *backend_ctx, const ggml_tensor *tensor) {
+inline bool enable_adreno_trans_weight(const ggml_backend_opencl_kepler_context *backend_ctx, const ggml_tensor *tensor) {
 
     bool adreno_kernel = use_adreno_kernels(backend_ctx, tensor);
 
@@ -5296,8 +5304,8 @@ inline bool enable_adreno_trans_weight(const ggml_backend_opencl_context *backen
     return ((elem_num < 128 * 1024 * 1024) && adreno_kernel);  // max element num: 2**27
 }
 
-static void ggml_backend_opencl_buffer_set_tensor(ggml_backend_buffer_t buffer, ggml_tensor * tensor, const void * data, size_t offset, size_t size) {
-    ggml_backend_opencl_context *backend_ctx = ggml_cl2_init(buffer->buft->device);
+static void ggml_backend_opencl_kepler_buffer_set_tensor(ggml_backend_buffer_t buffer, ggml_tensor * tensor, const void * data, size_t offset, size_t size) {
+    ggml_backend_opencl_kepler_context *backend_ctx = ggml_cl2_init(buffer->buft->device);
 
     cl_context context = backend_ctx->context;
     cl_command_queue queue = backend_ctx->queue;
@@ -5316,7 +5324,7 @@ static void ggml_backend_opencl_buffer_set_tensor(ggml_backend_buffer_t buffer, 
         GGML_ASSERT(extra_orig && "Tesnors in OpenCL backend should have been allocated and initialized");
 
         // Allocate the new extra and create aliases from the original.
-        ggml_backend_opencl_buffer_context * ctx = (ggml_backend_opencl_buffer_context *) buffer->context;
+        ggml_backend_opencl_kepler_buffer_context * ctx = (ggml_backend_opencl_kepler_buffer_context *) buffer->context;
         ggml_tensor_extra_cl_q4_0 * extra = ctx->ggml_opencl_alloc_temp_tensor_extra_q4_0();
 
         size_t size_d = ggml_nelements(tensor)/ggml_blck_size(tensor->type)*sizeof(ggml_fp16_t);
@@ -5566,7 +5574,7 @@ static void ggml_backend_opencl_buffer_set_tensor(ggml_backend_buffer_t buffer, 
         GGML_ASSERT(extra_orig && "Tesnors in OpenCL backend should have been allocated and initialized");
 
         // Allocate the new extra and create aliases from the original.
-        ggml_backend_opencl_buffer_context * ctx = (ggml_backend_opencl_buffer_context *) buffer->context;
+        ggml_backend_opencl_kepler_buffer_context * ctx = (ggml_backend_opencl_kepler_buffer_context *) buffer->context;
         ggml_tensor_extra_cl_q4_1 * extra = ctx->ggml_opencl_alloc_temp_tensor_extra_q4_1();
 
         size_t size_d = ggml_nelements(tensor)/ggml_blck_size(tensor->type)*sizeof(ggml_fp16_t);
@@ -5659,7 +5667,7 @@ static void ggml_backend_opencl_buffer_set_tensor(ggml_backend_buffer_t buffer, 
         GGML_ASSERT(extra_orig && "Tesnors in OpenCL backend should have been allocated and initialized");
 
         // Allocate the new extra and create aliases from the original.
-        ggml_backend_opencl_buffer_context * ctx = (ggml_backend_opencl_buffer_context *) buffer->context;
+        ggml_backend_opencl_kepler_buffer_context * ctx = (ggml_backend_opencl_kepler_buffer_context *) buffer->context;
         ggml_tensor_extra_cl_mxfp4 * extra = ctx->ggml_opencl_alloc_temp_tensor_extra_mxfp4();
 
         size_t size_e = ggml_nelements(tensor)/ggml_blck_size(tensor->type)*sizeof(char);
@@ -5752,7 +5760,7 @@ static void ggml_backend_opencl_buffer_set_tensor(ggml_backend_buffer_t buffer, 
         GGML_ASSERT(extra_orig && "Tesnors in OpenCL backend should have been allocated and initialized");
 
         // Allocate the new extra and create aliases from the original.
-        ggml_backend_opencl_buffer_context * ctx = (ggml_backend_opencl_buffer_context *) buffer->context;
+        ggml_backend_opencl_kepler_buffer_context * ctx = (ggml_backend_opencl_kepler_buffer_context *) buffer->context;
         ggml_tensor_extra_cl_q8_0 * extra = ctx->ggml_opencl_alloc_temp_tensor_extra_q8_0();
 
         size_t size_d = ggml_nelements(tensor)/ggml_blck_size(tensor->type)*sizeof(ggml_fp16_t);
@@ -5935,7 +5943,7 @@ static void ggml_backend_opencl_buffer_set_tensor(ggml_backend_buffer_t buffer, 
         GGML_ASSERT(extra_orig && "Tesnors in OpenCL backend should have been allocated and initialized");
 
         // Allocate the new extra and create aliases from the original.
-        ggml_backend_opencl_buffer_context * ctx = (ggml_backend_opencl_buffer_context *) buffer->context;
+        ggml_backend_opencl_kepler_buffer_context * ctx = (ggml_backend_opencl_kepler_buffer_context *) buffer->context;
         ggml_tensor_extra_cl_q4_K * extra = ctx->ggml_opencl_alloc_temp_tensor_extra_q4_K();
 
         size_t size_d = ggml_nelements(tensor)/ggml_blck_size(tensor->type)*sizeof(ggml_fp16_t);
@@ -6039,7 +6047,7 @@ static void ggml_backend_opencl_buffer_set_tensor(ggml_backend_buffer_t buffer, 
         GGML_ASSERT(extra_orig && "Tesnors in OpenCL backend should have been allocated and initialized");
 
         // Allocate the new extra and create aliases from the original.
-        ggml_backend_opencl_buffer_context * ctx = (ggml_backend_opencl_buffer_context *) buffer->context;
+        ggml_backend_opencl_kepler_buffer_context * ctx = (ggml_backend_opencl_kepler_buffer_context *) buffer->context;
         ggml_tensor_extra_cl_q6_K * extra = ctx->ggml_opencl_alloc_temp_tensor_extra_q6_K();
 
         size_t size_ql = ggml_nelements(tensor)/ggml_blck_size(tensor->type)*ggml_blck_size(tensor->type)/2;
@@ -6153,10 +6161,10 @@ static void ggml_backend_opencl_buffer_set_tensor(ggml_backend_buffer_t buffer, 
     GGML_UNUSED(buffer);
 }
 
-static void ggml_backend_opencl_buffer_get_tensor(ggml_backend_buffer_t buffer, const ggml_tensor * tensor, void * data, size_t offset, size_t size) {
+static void ggml_backend_opencl_kepler_buffer_get_tensor(ggml_backend_buffer_t buffer, const ggml_tensor * tensor, void * data, size_t offset, size_t size) {
     GGML_ASSERT(tensor->extra);
 
-    ggml_backend_opencl_context *backend_ctx = ggml_cl2_init(buffer->buft->device);
+    ggml_backend_opencl_kepler_context *backend_ctx = ggml_cl2_init(buffer->buft->device);
 
     cl_context context = backend_ctx->context;
     cl_command_queue queue = backend_ctx->queue;
@@ -6641,47 +6649,47 @@ static void ggml_backend_opencl_buffer_get_tensor(ggml_backend_buffer_t buffer, 
     GGML_UNUSED(buffer);
 }
 
-static void ggml_backend_opencl_buffer_clear(ggml_backend_buffer_t buffer, uint8_t value) {
+static void ggml_backend_opencl_kepler_buffer_clear(ggml_backend_buffer_t buffer, uint8_t value) {
     ggml_backend_dev_t dev = buffer->buft->device;
-    ggml_backend_opencl_context *backend_ctx = ggml_cl2_init(dev);
+    ggml_backend_opencl_kepler_context *backend_ctx = ggml_cl2_init(dev);
     cl_command_queue queue = backend_ctx->queue;
 
-    ggml_backend_opencl_buffer_context * ctx = (ggml_backend_opencl_buffer_context *) buffer->context;
+    ggml_backend_opencl_kepler_buffer_context * ctx = (ggml_backend_opencl_kepler_buffer_context *) buffer->context;
     for (cl_mem buf : ctx->buffer) {
         CL_CHECK(clEnqueueFillBuffer(queue, buf, &value, sizeof(value), 0, buffer->size, 0, NULL, NULL));
     }
     CL_CHECK(clFinish(queue));
 }
 
-static void ggml_backend_opencl_buffer_reset(ggml_backend_buffer_t buffer) {
-    ggml_backend_opencl_buffer_context * ctx = (ggml_backend_opencl_buffer_context *) buffer->context;
+static void ggml_backend_opencl_kepler_buffer_reset(ggml_backend_buffer_t buffer) {
+    ggml_backend_opencl_kepler_buffer_context * ctx = (ggml_backend_opencl_kepler_buffer_context *) buffer->context;
     ctx->reset();
 }
 
-static ggml_backend_buffer_i ggml_backend_opencl_buffer_interface = {
-    /* .free_buffer     = */ ggml_backend_opencl_buffer_free_buffer,
-    /* .get_base        = */ ggml_backend_opencl_buffer_get_base,
-    /* .init_tensor     = */ ggml_backend_opencl_buffer_init_tensor,
+static ggml_backend_buffer_i ggml_backend_opencl_kepler_buffer_interface = {
+    /* .free_buffer     = */ ggml_backend_opencl_kepler_buffer_free_buffer,
+    /* .get_base        = */ ggml_backend_opencl_kepler_buffer_get_base,
+    /* .init_tensor     = */ ggml_backend_opencl_kepler_buffer_init_tensor,
     /* .memset_tensor   = */ NULL,
-    /* .set_tensor      = */ ggml_backend_opencl_buffer_set_tensor,
-    /* .get_tensor      = */ ggml_backend_opencl_buffer_get_tensor,
+    /* .set_tensor      = */ ggml_backend_opencl_kepler_buffer_set_tensor,
+    /* .get_tensor      = */ ggml_backend_opencl_kepler_buffer_get_tensor,
     /* .cpy_tensor      = */ NULL,
-    /* .clear           = */ ggml_backend_opencl_buffer_clear,
-    /* .reset           = */ ggml_backend_opencl_buffer_reset,
+    /* .clear           = */ ggml_backend_opencl_kepler_buffer_clear,
+    /* .reset           = */ ggml_backend_opencl_kepler_buffer_reset,
 };
 
 //
 // buffer type
 //
 
-static const char * ggml_backend_opencl_buffer_type_get_name(ggml_backend_buffer_type_t buffer_type) {
-    return "OpenCL";
+static const char * ggml_backend_opencl_kepler_buffer_type_get_name(ggml_backend_buffer_type_t buffer_type) {
+    return "OpenCL-Kepler";
 
     GGML_UNUSED(buffer_type);
 }
 
-static ggml_backend_buffer_t ggml_backend_opencl_buffer_type_alloc_buffer(ggml_backend_buffer_type_t buffer_type, size_t size) {
-    ggml_backend_opencl_context *backend_ctx = ggml_cl2_init(buffer_type->device);
+static ggml_backend_buffer_t ggml_backend_opencl_kepler_buffer_type_alloc_buffer(ggml_backend_buffer_type_t buffer_type, size_t size) {
+    ggml_backend_opencl_kepler_context *backend_ctx = ggml_cl2_init(buffer_type->device);
 
     // clCreateBuffer returns -61 for size 0
     size = std::max(size, (size_t)1);
@@ -6700,36 +6708,36 @@ static ggml_backend_buffer_t ggml_backend_opencl_buffer_type_alloc_buffer(ggml_b
         return nullptr;
     }
 
-    ggml_backend_opencl_buffer_context * ctx = new ggml_backend_opencl_buffer_context(mem);
+    ggml_backend_opencl_kepler_buffer_context * ctx = new ggml_backend_opencl_kepler_buffer_context(mem);
 
-    return ggml_backend_buffer_init(buffer_type, ggml_backend_opencl_buffer_interface, ctx, size);
+    return ggml_backend_buffer_init(buffer_type, ggml_backend_opencl_kepler_buffer_interface, ctx, size);
 }
 
-static size_t ggml_backend_opencl_buffer_type_get_alignment(ggml_backend_buffer_type_t buffer_type) {
-    ggml_backend_opencl_context * backend_ctx = ggml_cl2_init(buffer_type->device);
+static size_t ggml_backend_opencl_kepler_buffer_type_get_alignment(ggml_backend_buffer_type_t buffer_type) {
+    ggml_backend_opencl_kepler_context * backend_ctx = ggml_cl2_init(buffer_type->device);
     return backend_ctx->alignment;
 }
 
-static size_t ggml_backend_opencl_buffer_type_get_max_size(ggml_backend_buffer_type_t buffer_type) {
+static size_t ggml_backend_opencl_kepler_buffer_type_get_max_size(ggml_backend_buffer_type_t buffer_type) {
     static size_t max_size = -1;
     if (max_size == (size_t)-1) {
-        ggml_backend_opencl_context * backend_ctx = ggml_cl2_init(buffer_type->device);
+        ggml_backend_opencl_kepler_context * backend_ctx = ggml_cl2_init(buffer_type->device);
         max_size = backend_ctx->max_alloc_size;
     }
     return max_size;
 }
 
-static bool ggml_backend_opencl_buffer_type_supports_backend(ggml_backend_buffer_type_t buft, ggml_backend_t backend) {
-    return ggml_backend_is_opencl(backend);
+static bool ggml_backend_opencl_kepler_buffer_type_supports_backend(ggml_backend_buffer_type_t buft, ggml_backend_t backend) {
+    return ggml_backend_is_opencl_kepler(backend);
 
     UNUSED(buft);
 }
 
-static ggml_backend_buffer_type_i ggml_backend_opencl_buffer_type_interface = {
-    /* .get_name         = */ ggml_backend_opencl_buffer_type_get_name,
-    /* .alloc_buffer     = */ ggml_backend_opencl_buffer_type_alloc_buffer,
-    /* .get_alignment    = */ ggml_backend_opencl_buffer_type_get_alignment,
-    /* .get_max_size     = */ ggml_backend_opencl_buffer_type_get_max_size,
+static ggml_backend_buffer_type_i ggml_backend_opencl_kepler_buffer_type_interface = {
+    /* .get_name         = */ ggml_backend_opencl_kepler_buffer_type_get_name,
+    /* .alloc_buffer     = */ ggml_backend_opencl_kepler_buffer_type_alloc_buffer,
+    /* .get_alignment    = */ ggml_backend_opencl_kepler_buffer_type_get_alignment,
+    /* .get_max_size     = */ ggml_backend_opencl_kepler_buffer_type_get_max_size,
     /* .get_alloc_size   = */ NULL,
     /* .is_host          = */ NULL,
 };
@@ -6738,18 +6746,18 @@ static ggml_backend_buffer_type_i ggml_backend_opencl_buffer_type_interface = {
 // backend device
 //
 
-static const char * ggml_backend_opencl_device_get_name(ggml_backend_dev_t dev) {
-    return "GPUOpenCL";
+static const char * ggml_backend_opencl_kepler_device_get_name(ggml_backend_dev_t dev) {
+    return "GPUOpenCLKepler";
 
     GGML_UNUSED(dev);
 }
 
-static const char * ggml_backend_opencl_device_get_description(ggml_backend_dev_t dev) {
-    ggml_backend_opencl_device_context *dev_ctx = (ggml_backend_opencl_device_context *) dev->context;
+static const char * ggml_backend_opencl_kepler_device_get_description(ggml_backend_dev_t dev) {
+    ggml_backend_opencl_kepler_device_context *dev_ctx = (ggml_backend_opencl_kepler_device_context *) dev->context;
     return dev_ctx->device_description.empty() ? dev_ctx->device_name.c_str() : dev_ctx->device_description.c_str();
 }
 
-static void ggml_backend_opencl_device_get_memory(ggml_backend_dev_t dev, size_t * free, size_t * total) {
+static void ggml_backend_opencl_kepler_device_get_memory(ggml_backend_dev_t dev, size_t * free, size_t * total) {
     // no memory to report
     *free  = 0;
     *total = 0;
@@ -6757,17 +6765,17 @@ static void ggml_backend_opencl_device_get_memory(ggml_backend_dev_t dev, size_t
     GGML_UNUSED(dev);
 }
 
-static enum ggml_backend_dev_type ggml_backend_opencl_device_get_type(ggml_backend_dev_t dev) {
+static enum ggml_backend_dev_type ggml_backend_opencl_kepler_device_get_type(ggml_backend_dev_t dev) {
     return GGML_BACKEND_DEVICE_TYPE_GPU;
 
     GGML_UNUSED(dev);
 }
 
-static void ggml_backend_opencl_device_get_props(ggml_backend_dev_t dev, struct ggml_backend_dev_props * props) {
-    props->name        = ggml_backend_opencl_device_get_name(dev);
-    props->description = ggml_backend_opencl_device_get_description(dev);
-    props->type        = ggml_backend_opencl_device_get_type(dev);
-    ggml_backend_opencl_device_get_memory(dev, &props->memory_free, &props->memory_total);
+static void ggml_backend_opencl_kepler_device_get_props(ggml_backend_dev_t dev, struct ggml_backend_dev_props * props) {
+    props->name        = ggml_backend_opencl_kepler_device_get_name(dev);
+    props->description = ggml_backend_opencl_kepler_device_get_description(dev);
+    props->type        = ggml_backend_opencl_kepler_device_get_type(dev);
+    ggml_backend_opencl_kepler_device_get_memory(dev, &props->memory_free, &props->memory_total);
     props->caps = ggml_backend_dev_caps {
         /* .async                 = */ false,
         /* .host_buffer           = */ false,
@@ -6776,14 +6784,14 @@ static void ggml_backend_opencl_device_get_props(ggml_backend_dev_t dev, struct 
     };
 }
 
-static ggml_backend_t ggml_backend_opencl_device_init(ggml_backend_dev_t dev, const char * params) {
-    ggml_backend_opencl_context * backend_ctx = ggml_cl2_init(dev);
+static ggml_backend_t ggml_backend_opencl_kepler_device_init(ggml_backend_dev_t dev, const char * params) {
+    ggml_backend_opencl_kepler_context * backend_ctx = ggml_cl2_init(dev);
     // Getting a new reference to the backend, increase ref_count
     backend_ctx->ref_count++;
 
     ggml_backend_t backend = new ggml_backend {
-        /* .guid      = */ ggml_backend_opencl_guid(),
-        /* .interface = */ ggml_backend_opencl_i,
+        /* .guid      = */ ggml_backend_opencl_kepler_guid(),
+        /* .interface = */ ggml_backend_opencl_kepler_i,
         /* .device    = */ dev,
         /* .context   = */ backend_ctx,
     };
@@ -6793,11 +6801,11 @@ static ggml_backend_t ggml_backend_opencl_device_init(ggml_backend_dev_t dev, co
     GGML_UNUSED(params);
 }
 
-static ggml_backend_buffer_type_t ggml_backend_opencl_device_get_buffer_type(ggml_backend_dev_t dev) {
-    auto * dev_ctx = static_cast<ggml_backend_opencl_device_context *>(dev->context);
+static ggml_backend_buffer_type_t ggml_backend_opencl_kepler_device_get_buffer_type(ggml_backend_dev_t dev) {
+    auto * dev_ctx = static_cast<ggml_backend_opencl_kepler_device_context *>(dev->context);
 
     dev_ctx->buffer_type = ggml_backend_buffer_type{
-        /* .iface   = */ ggml_backend_opencl_buffer_type_interface,
+        /* .iface   = */ ggml_backend_opencl_kepler_buffer_type_interface,
         /* .device  = */ dev,
         /* .context = */ nullptr,
     };
@@ -6805,7 +6813,7 @@ static ggml_backend_buffer_type_t ggml_backend_opencl_device_get_buffer_type(ggm
     return &dev_ctx->buffer_type;
 }
 
-static ggml_backend_buffer_t ggml_backend_opencl_device_buffer_from_ptr(ggml_backend_dev_t dev, void * ptr, size_t size, size_t max_tensor_size) {
+static ggml_backend_buffer_t ggml_backend_opencl_kepler_device_buffer_from_ptr(ggml_backend_dev_t dev, void * ptr, size_t size, size_t max_tensor_size) {
     GGML_UNUSED(dev);
     GGML_UNUSED(ptr);
     GGML_UNUSED(size);
@@ -6813,37 +6821,37 @@ static ggml_backend_buffer_t ggml_backend_opencl_device_buffer_from_ptr(ggml_bac
     return nullptr;
 }
 
-static bool ggml_backend_opencl_device_supports_op(ggml_backend_dev_t dev, const struct ggml_tensor * op) {
+static bool ggml_backend_opencl_kepler_device_supports_op(ggml_backend_dev_t dev, const struct ggml_tensor * op) {
     return ggml_opencl_supports_op(dev, op);
 }
 
-static bool ggml_backend_opencl_device_supports_buft(ggml_backend_dev_t dev, ggml_backend_buffer_type_t buft) {
+static bool ggml_backend_opencl_kepler_device_supports_buft(ggml_backend_dev_t dev, ggml_backend_buffer_type_t buft) {
     // Check 'dev' and 'buffer_type' are not objects belonging to this backend.
-    if (dev->iface.get_name != ggml_backend_opencl_device_get_name ||
-        buft->iface.get_name != ggml_backend_opencl_buffer_type_get_name) {
+    if (dev->iface.get_name != ggml_backend_opencl_kepler_device_get_name ||
+        buft->iface.get_name != ggml_backend_opencl_kepler_buffer_type_get_name) {
         return false;
     }
 
     // Check cl_context is the same. clEnqueue* commands may not use
     // buffers from another cl_context.
-    ggml_backend_opencl_context * backend_ctx0 = ggml_cl2_init(dev);
-    ggml_backend_opencl_context * backend_ctx1 = ggml_cl2_init(buft->device);
+    ggml_backend_opencl_kepler_context * backend_ctx0 = ggml_cl2_init(dev);
+    ggml_backend_opencl_kepler_context * backend_ctx1 = ggml_cl2_init(buft->device);
     return backend_ctx0->context == backend_ctx1->context;
 }
 
 namespace /* anonymous */ {
-struct ggml_backend_device_i ggml_backend_opencl_device_i = {
-    /* .get_name             = */ ggml_backend_opencl_device_get_name,
-    /* .get_description      = */ ggml_backend_opencl_device_get_description,
-    /* .get_memory           = */ ggml_backend_opencl_device_get_memory,
-    /* .get_type             = */ ggml_backend_opencl_device_get_type,
-    /* .get_props            = */ ggml_backend_opencl_device_get_props,
-    /* .init_backend         = */ ggml_backend_opencl_device_init,
-    /* .get_buffer_type      = */ ggml_backend_opencl_device_get_buffer_type,
+struct ggml_backend_device_i ggml_backend_opencl_kepler_device_i = {
+    /* .get_name             = */ ggml_backend_opencl_kepler_device_get_name,
+    /* .get_description      = */ ggml_backend_opencl_kepler_device_get_description,
+    /* .get_memory           = */ ggml_backend_opencl_kepler_device_get_memory,
+    /* .get_type             = */ ggml_backend_opencl_kepler_device_get_type,
+    /* .get_props            = */ ggml_backend_opencl_kepler_device_get_props,
+    /* .init_backend         = */ ggml_backend_opencl_kepler_device_init,
+    /* .get_buffer_type      = */ ggml_backend_opencl_kepler_device_get_buffer_type,
     /* .get_host_buffer_type = */ NULL,
-    /* .buffer_from_host_ptr = */ ggml_backend_opencl_device_buffer_from_ptr,
-    /* .supports_op          = */ ggml_backend_opencl_device_supports_op,
-    /* .supports_buft        = */ ggml_backend_opencl_device_supports_buft,
+    /* .buffer_from_host_ptr = */ ggml_backend_opencl_kepler_device_buffer_from_ptr,
+    /* .supports_op          = */ ggml_backend_opencl_kepler_device_supports_op,
+    /* .supports_buft        = */ ggml_backend_opencl_kepler_device_supports_buft,
     /* .offload_op           = */ NULL,
     /* .event_new            = */ NULL,
     /* .event_free           = */ NULL,
@@ -6853,35 +6861,35 @@ struct ggml_backend_device_i ggml_backend_opencl_device_i = {
 
 // Backend registry
 
-static const char * ggml_backend_opencl_reg_get_name(ggml_backend_reg_t reg) {
-    return "OpenCL";
+static const char * ggml_backend_opencl_kepler_reg_get_name(ggml_backend_reg_t reg) {
+    return "OpenCL-Kepler";
 
     GGML_UNUSED(reg);
 }
 
-static size_t ggml_backend_opencl_reg_device_count(ggml_backend_reg_t reg) {
-    return g_ggml_backend_opencl_devices.size();
+static size_t ggml_backend_opencl_kepler_reg_device_count(ggml_backend_reg_t reg) {
+    return g_ggml_backend_opencl_kepler_devices.size();
 
     GGML_UNUSED(reg);
 }
 
-static ggml_backend_dev_t ggml_backend_opencl_reg_device_get(ggml_backend_reg_t reg, size_t index) {
-    GGML_ASSERT(index < ggml_backend_opencl_reg_device_count(reg));
+static ggml_backend_dev_t ggml_backend_opencl_kepler_reg_device_get(ggml_backend_reg_t reg, size_t index) {
+    GGML_ASSERT(index < ggml_backend_opencl_kepler_reg_device_count(reg));
 
-    return &g_ggml_backend_opencl_devices[index];
+    return &g_ggml_backend_opencl_kepler_devices[index];
 
     GGML_UNUSED(reg);
     GGML_UNUSED(index);
 }
 
-static struct ggml_backend_reg_i ggml_backend_opencl_reg_i = {
-    /* .get_name         = */ ggml_backend_opencl_reg_get_name,
-    /* .device_count     = */ ggml_backend_opencl_reg_device_count,
-    /* .device_get       = */ ggml_backend_opencl_reg_device_get,
+static struct ggml_backend_reg_i ggml_backend_opencl_kepler_reg_i = {
+    /* .get_name         = */ ggml_backend_opencl_kepler_reg_get_name,
+    /* .device_count     = */ ggml_backend_opencl_kepler_reg_device_count,
+    /* .device_get       = */ ggml_backend_opencl_kepler_reg_device_get,
     /* .get_proc_address = */ NULL,
 };
 
-ggml_backend_reg_t ggml_backend_opencl_reg(void) {
+ggml_backend_reg_t ggml_backend_opencl_kepler_reg(void) {
     static std::mutex mutex;
     static ggml_backend_reg reg;
     static bool initialized = false;
@@ -6892,18 +6900,18 @@ ggml_backend_reg_t ggml_backend_opencl_reg(void) {
     }
     initialized = true;
 
-    g_ggml_backend_opencl_devices = ggml_opencl_probe_devices(&reg);
+    g_ggml_backend_opencl_kepler_devices = ggml_opencl_probe_devices(&reg);
 
     reg = ggml_backend_reg{
         /* .api_version = */ GGML_BACKEND_API_VERSION,
-        /* .iface       = */ ggml_backend_opencl_reg_i,
+        /* .iface       = */ ggml_backend_opencl_kepler_reg_i,
         /* .context     = */ NULL,
     };
 
     return &reg;
 }
 
-GGML_BACKEND_DL_IMPL(ggml_backend_opencl_reg)
+GGML_BACKEND_DL_IMPL(ggml_backend_opencl_kepler_reg)
 
 //------------------------------------------------------------------------------
 // Debugging utils
@@ -6927,7 +6935,7 @@ static_assert(sizeof(block_q4_0) == sizeof(ggml_fp16_t) + QK4_0 / 2,
 static void dump_tensor(ggml_backend_t backend, const struct ggml_tensor * tensor) {
     void * buf = malloc(ggml_nbytes(tensor));
 
-    ggml_backend_opencl_context *backend_ctx = (ggml_backend_opencl_context *)backend->context;
+    ggml_backend_opencl_kepler_context *backend_ctx = (ggml_backend_opencl_kepler_context *)backend->context;
     cl_command_queue queue = backend_ctx->queue;
 #ifdef GGML_OPENCL_SOA_Q
     void * buf_q;
@@ -7073,7 +7081,7 @@ static bool ggml_cl_can_mul_mat(const struct ggml_tensor * src0, const struct gg
 }
 
 #ifdef GGML_OPENCL_USE_CLBLAST
-static size_t ggml_opencl_legacy_f32_staging_budget(const ggml_backend_opencl_context * ctx) {
+static size_t ggml_opencl_legacy_f32_staging_budget(const ggml_backend_opencl_kepler_context * ctx) {
     if (ctx == nullptr || ctx->max_alloc_size == 0) {
         return (size_t) 1u << 20;
     }
@@ -7110,7 +7118,7 @@ static bool ggml_opencl_legacy_dequant_wg_ok(size_t ne, ggml_type type) {
     return (global % local) == 0;
 }
 
-static bool ggml_opencl_legacy_slice_origin_aligned(const ggml_backend_opencl_context * ctx,
+static bool ggml_opencl_legacy_slice_origin_aligned(const ggml_backend_opencl_kepler_context * ctx,
                                                     const ggml_tensor * src0,
                                                     const ggml_tensor_extra_cl * extra0,
                                                     int64_t i02,
@@ -7126,7 +7134,7 @@ static bool ggml_opencl_legacy_slice_origin_aligned(const ggml_backend_opencl_co
     return (origin % align) == 0;
 }
 
-static int64_t ggml_opencl_legacy_pick_col_chunk(const ggml_backend_opencl_context * ctx,
+static int64_t ggml_opencl_legacy_pick_col_chunk(const ggml_backend_opencl_kepler_context * ctx,
                                                  const ggml_tensor * src0,
                                                  const ggml_tensor_extra_cl * extra0,
                                                  int64_t i02,
@@ -7164,7 +7172,7 @@ static int64_t ggml_opencl_legacy_pick_col_chunk(const ggml_backend_opencl_conte
     return 0;
 }
 
-static bool ggml_opencl_legacy_col_chunking_feasible(const ggml_backend_opencl_context * backend_ctx,
+static bool ggml_opencl_legacy_col_chunking_feasible(const ggml_backend_opencl_kepler_context * backend_ctx,
                                                    const ggml_tensor * src0,
                                                    const ggml_tensor_extra_cl * extra0,
                                                    int64_t ne02,
@@ -7188,7 +7196,7 @@ static bool ggml_opencl_legacy_col_chunking_feasible(const ggml_backend_opencl_c
     return true;
 }
 
-static void ggml_opencl_legacy_dequant_col_range(ggml_backend_opencl_context * backend_ctx,
+static void ggml_opencl_legacy_dequant_col_range(ggml_backend_opencl_kepler_context * backend_ctx,
                                                  const ggml_tensor * src0,
                                                  const ggml_tensor_extra_cl * extra0,
                                                  int64_t i02,
@@ -7229,7 +7237,7 @@ static void ggml_opencl_legacy_dequant_col_range(ggml_backend_opencl_context * b
     CL_CHECK(clReleaseMemObject(raw_src));
 }
 
-static bool ggml_opencl_can_mul_mat_legacy(const ggml_backend_opencl_context * backend_ctx,
+static bool ggml_opencl_can_mul_mat_legacy(const ggml_backend_opencl_kepler_context * backend_ctx,
                                            const struct ggml_tensor * src0,
                                            const struct ggml_tensor * src1,
                                            const struct ggml_tensor * dst) {
@@ -7287,7 +7295,7 @@ static bool ggml_opencl_can_mul_mat_legacy(const ggml_backend_opencl_context * b
     return true;
 }
 
-static cl_mem ggml_opencl_create_tensor_subbuffer(const ggml_backend_opencl_context * backend_ctx, const ggml_tensor * tensor) {
+static cl_mem ggml_opencl_create_tensor_subbuffer(const ggml_backend_opencl_kepler_context * backend_ctx, const ggml_tensor * tensor) {
     const auto * extra = (const ggml_tensor_extra_cl *) tensor->extra;
     GGML_ASSERT(extra != nullptr);
 
@@ -7303,7 +7311,7 @@ static cl_mem ggml_opencl_create_tensor_subbuffer(const ggml_backend_opencl_cont
 }
 
 static cl_mem ggml_opencl_legacy_prepare_src0_f32(ggml_backend_t backend, const ggml_tensor * src0, size_t * offset_elements) {
-    auto * backend_ctx = (ggml_backend_opencl_context *) backend->context;
+    auto * backend_ctx = (ggml_backend_opencl_kepler_context *) backend->context;
     const auto * extra0 = (const ggml_tensor_extra_cl *) src0->extra;
     GGML_ASSERT(extra0 != nullptr);
 
@@ -7345,7 +7353,7 @@ static bool ggml_opencl_legacy_native_gemm_env(void) {
 }
 
 static void ggml_opencl_legacy_gemm_f32_naive(
-    ggml_backend_opencl_context * backend_ctx,
+    ggml_backend_opencl_kepler_context * backend_ctx,
     cl_mem buf_a,
     cl_ulong off_a_elems,
     cl_mem buf_b,
@@ -7386,7 +7394,7 @@ static void ggml_cl_legacy_get_rows(ggml_backend_t backend, const ggml_tensor * 
     GGML_TENSOR_LOCALS(int,      ne,  dst,  ne);
     GGML_TENSOR_LOCALS(cl_ulong, nb,  dst,  nb);
 
-    ggml_backend_opencl_context * backend_ctx = (ggml_backend_opencl_context *) backend->context;
+    ggml_backend_opencl_kepler_context * backend_ctx = (ggml_backend_opencl_kepler_context *) backend->context;
 
     ggml_tensor_extra_cl * extra0 = (ggml_tensor_extra_cl *) src0->extra;
     ggml_tensor_extra_cl * extra1 = (ggml_tensor_extra_cl *) src1->extra;
@@ -7444,7 +7452,7 @@ static void ggml_cl_legacy_get_rows(ggml_backend_t backend, const ggml_tensor * 
 }
 
 static void ggml_cl_mul_mat_legacy_nvidia(ggml_backend_t backend, const ggml_tensor * src0, const ggml_tensor * src1, ggml_tensor * dst) {
-    auto * backend_ctx = (ggml_backend_opencl_context *) backend->context;
+    auto * backend_ctx = (ggml_backend_opencl_kepler_context *) backend->context;
     const auto * extra0 = (const ggml_tensor_extra_cl *) src0->extra;
     const auto * extra1 = (const ggml_tensor_extra_cl *) src1->extra;
     const auto * extrad = (const ggml_tensor_extra_cl *) dst->extra;
@@ -7598,7 +7606,7 @@ static void ggml_cl_mul_mat_legacy_nvidia(ggml_backend_t backend, const ggml_ten
 // nb[] is recalculated such that tensor is contiguous.
 static void ggml_cl_copy_to_contiguous(ggml_backend_t backend, const ggml_tensor * src, cl_mem dst,
                                        cl_ulong &nb0, cl_ulong &nb1, cl_ulong &nb2, cl_ulong &nb3) {
-    ggml_backend_opencl_context *backend_ctx = (ggml_backend_opencl_context *)backend->context;
+    ggml_backend_opencl_kepler_context *backend_ctx = (ggml_backend_opencl_kepler_context *)backend->context;
 
     const int tensor_type_size = ggml_type_size(src->type);
 
@@ -7691,7 +7699,7 @@ static void ggml_cl_get_rows(ggml_backend_t backend, const ggml_tensor * src0, c
     GGML_TENSOR_LOCALS(int,      ne,  dst,  ne);
     GGML_TENSOR_LOCALS(cl_ulong, nb,  dst,  nb);
 
-    ggml_backend_opencl_context *backend_ctx = (ggml_backend_opencl_context *)backend->context;
+    ggml_backend_opencl_kepler_context *backend_ctx = (ggml_backend_opencl_kepler_context *)backend->context;
 
     ggml_tensor_extra_cl * extra0 = (ggml_tensor_extra_cl *)src0->extra;
     ggml_tensor_extra_cl * extra1 = (ggml_tensor_extra_cl *)src1->extra;
@@ -7783,7 +7791,7 @@ static void ggml_cl_set_rows(ggml_backend_t backend, const ggml_tensor * src0, c
 
     const int nblk0 = ne0/ggml_blck_size(dst->type);
 
-    ggml_backend_opencl_context *backend_ctx = (ggml_backend_opencl_context *)backend->context;
+    ggml_backend_opencl_kepler_context *backend_ctx = (ggml_backend_opencl_kepler_context *)backend->context;
 
     ggml_tensor_extra_cl * extra0 = (ggml_tensor_extra_cl *)src0->extra;
     ggml_tensor_extra_cl * extra1 = (ggml_tensor_extra_cl *)src1->extra;
@@ -7902,7 +7910,7 @@ static void ggml_cl_add(ggml_backend_t backend, const ggml_tensor * src0, const 
     const cl_ulong nb2  = dst->nb[2];
     const cl_ulong nb3  = dst->nb[3];
 
-    ggml_backend_opencl_context *backend_ctx = (ggml_backend_opencl_context *)backend->context;
+    ggml_backend_opencl_kepler_context *backend_ctx = (ggml_backend_opencl_kepler_context *)backend->context;
 
     ggml_tensor_extra_cl * extra0 = (ggml_tensor_extra_cl *)src0->extra;
     ggml_tensor_extra_cl * extra1 = (ggml_tensor_extra_cl *)src1->extra;
@@ -8075,7 +8083,7 @@ static void ggml_cl_add_id(ggml_backend_t backend, const ggml_tensor * src0, con
     const int ne0 = dst->ne[0];
     const int ne1 = dst->ne[1];
 
-    ggml_backend_opencl_context *backend_ctx = (ggml_backend_opencl_context *)backend->context;
+    ggml_backend_opencl_kepler_context *backend_ctx = (ggml_backend_opencl_kepler_context *)backend->context;
 
     ggml_tensor_extra_cl * extra0 = (ggml_tensor_extra_cl *)src0->extra;
     ggml_tensor_extra_cl * extra1 = (ggml_tensor_extra_cl *)src1->extra;
@@ -8153,7 +8161,7 @@ static void ggml_cl_mul(ggml_backend_t backend, const ggml_tensor * src0, const 
     const cl_ulong nb2  = dst->nb[2];
     const cl_ulong nb3  = dst->nb[3];
 
-    ggml_backend_opencl_context *backend_ctx = (ggml_backend_opencl_context *)backend->context;
+    ggml_backend_opencl_kepler_context *backend_ctx = (ggml_backend_opencl_kepler_context *)backend->context;
 
     ggml_tensor_extra_cl * extra0 = (ggml_tensor_extra_cl *)src0->extra;
     ggml_tensor_extra_cl * extra1 = (ggml_tensor_extra_cl *)src1->extra;
@@ -8286,7 +8294,7 @@ static void ggml_cl_div(ggml_backend_t backend, const ggml_tensor * src0, const 
     const cl_ulong nb2  = dst->nb[2];
     const cl_ulong nb3  = dst->nb[3];
 
-    ggml_backend_opencl_context *backend_ctx = (ggml_backend_opencl_context *)backend->context;
+    ggml_backend_opencl_kepler_context *backend_ctx = (ggml_backend_opencl_kepler_context *)backend->context;
 
     ggml_tensor_extra_cl * extra0 = (ggml_tensor_extra_cl *)src0->extra;
     ggml_tensor_extra_cl * extra1 = (ggml_tensor_extra_cl *)src1->extra;
@@ -8407,7 +8415,7 @@ static void ggml_cl_sub(ggml_backend_t backend, const ggml_tensor * src0, const 
     const cl_ulong nb2  = dst->nb[2];
     const cl_ulong nb3  = dst->nb[3];
 
-    ggml_backend_opencl_context *backend_ctx = (ggml_backend_opencl_context *)backend->context;
+    ggml_backend_opencl_kepler_context *backend_ctx = (ggml_backend_opencl_kepler_context *)backend->context;
 
     ggml_tensor_extra_cl * extra0 = (ggml_tensor_extra_cl *)src0->extra;
     ggml_tensor_extra_cl * extra1 = (ggml_tensor_extra_cl *)src1->extra;
@@ -8496,7 +8504,7 @@ static void ggml_cl_sqr(ggml_backend_t backend, const ggml_tensor * src0, const 
     GGML_ASSERT(dst->extra);
     UNUSED(src1);
 
-    ggml_backend_opencl_context *backend_ctx = (ggml_backend_opencl_context *)backend->context;
+    ggml_backend_opencl_kepler_context *backend_ctx = (ggml_backend_opencl_kepler_context *)backend->context;
 
     ggml_tensor_extra_cl * extra0 = (ggml_tensor_extra_cl *)src0->extra;
     ggml_tensor_extra_cl * extrad = (ggml_tensor_extra_cl *)dst->extra;
@@ -8546,7 +8554,7 @@ static void ggml_cl_sqrt(ggml_backend_t backend, const ggml_tensor * src0, const
     GGML_ASSERT(dst->extra);
     UNUSED(src1);
 
-    ggml_backend_opencl_context *backend_ctx = (ggml_backend_opencl_context *)backend->context;
+    ggml_backend_opencl_kepler_context *backend_ctx = (ggml_backend_opencl_kepler_context *)backend->context;
 
     ggml_tensor_extra_cl * extra0 = (ggml_tensor_extra_cl *)src0->extra;
     ggml_tensor_extra_cl * extrad = (ggml_tensor_extra_cl *)dst->extra;
@@ -8598,7 +8606,7 @@ static void ggml_cl_mean(ggml_backend_t backend, const ggml_tensor * src0, const
 
     GGML_ASSERT(src0->nb[0] == ggml_type_size(src0->type));
 
-    ggml_backend_opencl_context *backend_ctx = (ggml_backend_opencl_context *)backend->context;
+    ggml_backend_opencl_kepler_context *backend_ctx = (ggml_backend_opencl_kepler_context *)backend->context;
 
     ggml_tensor_extra_cl * extra0 = (ggml_tensor_extra_cl *)src0->extra;
     ggml_tensor_extra_cl * extrad = (ggml_tensor_extra_cl *)dst->extra;
@@ -8657,7 +8665,7 @@ static void ggml_cl_ssm_conv(ggml_backend_t backend, const ggml_tensor * src0, c
     GGML_ASSERT(dst);
     GGML_ASSERT(dst->extra);
 
-    ggml_backend_opencl_context *backend_ctx = (ggml_backend_opencl_context *)backend->context;
+    ggml_backend_opencl_kepler_context *backend_ctx = (ggml_backend_opencl_kepler_context *)backend->context;
 
     ggml_tensor_extra_cl * extra0 = (ggml_tensor_extra_cl *)src0->extra;
     ggml_tensor_extra_cl * extra1 = (ggml_tensor_extra_cl *)src1->extra;
@@ -8721,7 +8729,7 @@ static void ggml_cl_gelu(ggml_backend_t backend, const ggml_tensor * src0, const
 
     UNUSED(src1);
 
-    ggml_backend_opencl_context *backend_ctx = (ggml_backend_opencl_context *)backend->context;
+    ggml_backend_opencl_kepler_context *backend_ctx = (ggml_backend_opencl_kepler_context *)backend->context;
 
     ggml_tensor_extra_cl * extra0 = (ggml_tensor_extra_cl *)src0->extra;
     ggml_tensor_extra_cl * extrad = (ggml_tensor_extra_cl *)dst->extra;
@@ -8759,7 +8767,7 @@ static void ggml_cl_gelu_erf(ggml_backend_t backend, const ggml_tensor * src0, c
 
     UNUSED(src1);
 
-    ggml_backend_opencl_context *backend_ctx = (ggml_backend_opencl_context *)backend->context;
+    ggml_backend_opencl_kepler_context *backend_ctx = (ggml_backend_opencl_kepler_context *)backend->context;
 
     ggml_tensor_extra_cl * extra0 = (ggml_tensor_extra_cl *)src0->extra;
     ggml_tensor_extra_cl * extrad = (ggml_tensor_extra_cl *)dst->extra;
@@ -8797,7 +8805,7 @@ static void ggml_cl_gelu_quick(ggml_backend_t backend, const ggml_tensor * src0,
 
     UNUSED(src1);
 
-    ggml_backend_opencl_context *backend_ctx = (ggml_backend_opencl_context *)backend->context;
+    ggml_backend_opencl_kepler_context *backend_ctx = (ggml_backend_opencl_kepler_context *)backend->context;
 
     ggml_tensor_extra_cl * extra0 = (ggml_tensor_extra_cl *)src0->extra;
     ggml_tensor_extra_cl * extrad = (ggml_tensor_extra_cl *)dst->extra;
@@ -8835,7 +8843,7 @@ static void ggml_cl_silu(ggml_backend_t backend, const ggml_tensor * src0, const
 
     UNUSED(src1);
 
-    ggml_backend_opencl_context *backend_ctx = (ggml_backend_opencl_context *)backend->context;
+    ggml_backend_opencl_kepler_context *backend_ctx = (ggml_backend_opencl_kepler_context *)backend->context;
 
     ggml_tensor_extra_cl * extra0 = (ggml_tensor_extra_cl *)src0->extra;
     ggml_tensor_extra_cl * extrad = (ggml_tensor_extra_cl *)dst->extra;
@@ -8878,7 +8886,7 @@ static void ggml_cl_relu(ggml_backend_t backend, const ggml_tensor * src0, const
 
     UNUSED(src1);
 
-    ggml_backend_opencl_context *backend_ctx = (ggml_backend_opencl_context *)backend->context;
+    ggml_backend_opencl_kepler_context *backend_ctx = (ggml_backend_opencl_kepler_context *)backend->context;
 
     ggml_tensor_extra_cl * extra0 = (ggml_tensor_extra_cl *)src0->extra;
     ggml_tensor_extra_cl * extrad = (ggml_tensor_extra_cl *)dst->extra;
@@ -8914,7 +8922,7 @@ static void ggml_cl_sigmoid(ggml_backend_t backend, const ggml_tensor * src0, co
 
     UNUSED(src1);
 
-    ggml_backend_opencl_context *backend_ctx = (ggml_backend_opencl_context *)backend->context;
+    ggml_backend_opencl_kepler_context *backend_ctx = (ggml_backend_opencl_kepler_context *)backend->context;
 
     ggml_tensor_extra_cl * extra0 = (ggml_tensor_extra_cl *)src0->extra;
     ggml_tensor_extra_cl * extrad = (ggml_tensor_extra_cl *)dst->extra;
@@ -8957,7 +8965,7 @@ static void ggml_cl_tri(ggml_backend_t backend, const ggml_tensor * src0, const 
 
     UNUSED(src1);
 
-    ggml_backend_opencl_context *backend_ctx = (ggml_backend_opencl_context *)backend->context;
+    ggml_backend_opencl_kepler_context *backend_ctx = (ggml_backend_opencl_kepler_context *)backend->context;
 
     ggml_tensor_extra_cl * extra0 = (ggml_tensor_extra_cl *)src0->extra;
     ggml_tensor_extra_cl * extrad = (ggml_tensor_extra_cl *)dst->extra;
@@ -8994,7 +9002,7 @@ static void ggml_cl_fill(ggml_backend_t backend, const ggml_tensor * src0, const
     UNUSED(src0);
     UNUSED(src1);
 
-    ggml_backend_opencl_context *backend_ctx = (ggml_backend_opencl_context *)backend->context;
+    ggml_backend_opencl_kepler_context *backend_ctx = (ggml_backend_opencl_kepler_context *)backend->context;
 
     ggml_tensor_extra_cl * extrad = (ggml_tensor_extra_cl *)dst->extra;
     cl_ulong offsetd = extrad->offset + dst->view_offs;
@@ -9025,7 +9033,7 @@ static void ggml_cl_clamp(ggml_backend_t backend, const ggml_tensor * src0, cons
 
     UNUSED(src1);
 
-    ggml_backend_opencl_context *backend_ctx = (ggml_backend_opencl_context *)backend->context;
+    ggml_backend_opencl_kepler_context *backend_ctx = (ggml_backend_opencl_kepler_context *)backend->context;
 
     ggml_tensor_extra_cl * extra0 = (ggml_tensor_extra_cl *)src0->extra;
     ggml_tensor_extra_cl * extrad = (ggml_tensor_extra_cl *)dst->extra;
@@ -9068,7 +9076,7 @@ static void ggml_cl_norm(ggml_backend_t backend, const ggml_tensor * src0, const
 
     UNUSED(src1);
 
-    ggml_backend_opencl_context *backend_ctx = (ggml_backend_opencl_context *)backend->context;
+    ggml_backend_opencl_kepler_context *backend_ctx = (ggml_backend_opencl_kepler_context *)backend->context;
 
     ggml_tensor_extra_cl * extra0 = (ggml_tensor_extra_cl *)src0->extra;
     ggml_tensor_extra_cl * extrad = (ggml_tensor_extra_cl *)dst->extra;
@@ -9120,10 +9128,10 @@ static void ggml_cl_rms_norm(ggml_backend_t backend, const ggml_tensor * src0, c
 
     UNUSED(src1);
 
-    ggml_backend_opencl_context *backend_ctx = (ggml_backend_opencl_context *)backend->context;
+    ggml_backend_opencl_kepler_context *backend_ctx = (ggml_backend_opencl_kepler_context *)backend->context;
 
-    //ggml_backend_opencl_device_context * dev_ctx =
-    //    (ggml_backend_opencl_device_context *)backend->device->context;
+    //ggml_backend_opencl_kepler_device_context * dev_ctx =
+    //    (ggml_backend_opencl_kepler_device_context *)backend->device->context;
 
     ggml_tensor_extra_cl * extra0 = (ggml_tensor_extra_cl *)src0->extra;
     ggml_tensor_extra_cl * extrad = (ggml_tensor_extra_cl *)dst->extra;
@@ -9218,7 +9226,7 @@ static void ggml_opencl_op_rms_norm_fused(ggml_backend_t backend, ggml_tensor * 
     cl_ulong offset1 = extra1->offset + src0->view_offs;
     cl_ulong offsetd = extrad->offset + dst->view_offs;
 
-    ggml_backend_opencl_context *backend_ctx = (ggml_backend_opencl_context *)backend->context;
+    ggml_backend_opencl_kepler_context *backend_ctx = (ggml_backend_opencl_kepler_context *)backend->context;
 
     float eps;
     memcpy(&eps, rms_norm_tensor->op_params, sizeof(float));
@@ -9316,7 +9324,7 @@ static void ggml_opencl_op_norm_fused(ggml_backend_t backend, ggml_tensor * norm
     cl_ulong offset2 = extra2->offset + src2->view_offs;
     cl_ulong offsetd = extrad->offset + dst->view_offs;
 
-    ggml_backend_opencl_context *backend_ctx = (ggml_backend_opencl_context *)backend->context;
+    ggml_backend_opencl_kepler_context *backend_ctx = (ggml_backend_opencl_kepler_context *)backend->context;
 
     float eps;
     memcpy(&eps, norm_tensor->op_params, sizeof(float));
@@ -9402,7 +9410,7 @@ static void ggml_opencl_op_group_norm_fused(ggml_backend_t backend, ggml_tensor 
     cl_ulong offset2 = extra2->offset + src2->view_offs;
     cl_ulong offsetd = extrad->offset + dst->view_offs;
 
-    ggml_backend_opencl_context *backend_ctx = (ggml_backend_opencl_context *)backend->context;
+    ggml_backend_opencl_kepler_context *backend_ctx = (ggml_backend_opencl_kepler_context *)backend->context;
 
     int groups;
     float eps;
@@ -9440,7 +9448,7 @@ static void ggml_cl_group_norm(ggml_backend_t backend, const ggml_tensor * src0,
 
     UNUSED(src1);
 
-    ggml_backend_opencl_context *backend_ctx = (ggml_backend_opencl_context *)backend->context;
+    ggml_backend_opencl_kepler_context *backend_ctx = (ggml_backend_opencl_kepler_context *)backend->context;
 
     ggml_tensor_extra_cl * extra0 = (ggml_tensor_extra_cl *)src0->extra;
     ggml_tensor_extra_cl * extrad = (ggml_tensor_extra_cl *)dst->extra;
@@ -9490,7 +9498,7 @@ static void ggml_cl_l2_norm(ggml_backend_t backend, const ggml_tensor * src0, co
 
     UNUSED(src1);
 
-    ggml_backend_opencl_context *backend_ctx = (ggml_backend_opencl_context *)backend->context;
+    ggml_backend_opencl_kepler_context *backend_ctx = (ggml_backend_opencl_kepler_context *)backend->context;
 
     ggml_tensor_extra_cl * extra0 = (ggml_tensor_extra_cl *)src0->extra;
     ggml_tensor_extra_cl * extrad = (ggml_tensor_extra_cl *)dst->extra;
@@ -9548,7 +9556,7 @@ static void ggml_cl_tanh(ggml_backend_t backend, const ggml_tensor * src0, const
 
     UNUSED(src1);
 
-    ggml_backend_opencl_context *backend_ctx = (ggml_backend_opencl_context *)backend->context;
+    ggml_backend_opencl_kepler_context *backend_ctx = (ggml_backend_opencl_kepler_context *)backend->context;
 
     ggml_tensor_extra_cl * extra0 = (ggml_tensor_extra_cl *)src0->extra;
     ggml_tensor_extra_cl * extrad = (ggml_tensor_extra_cl *)dst->extra;
@@ -9644,7 +9652,7 @@ static void ggml_cl_neg(ggml_backend_t backend, const ggml_tensor * src0, const 
 
     UNUSED(src1);
 
-    ggml_backend_opencl_context *backend_ctx = (ggml_backend_opencl_context *)backend->context;
+    ggml_backend_opencl_kepler_context *backend_ctx = (ggml_backend_opencl_kepler_context *)backend->context;
 
     ggml_tensor_extra_cl * extra0 = (ggml_tensor_extra_cl *)src0->extra;
     ggml_tensor_extra_cl * extrad = (ggml_tensor_extra_cl *)dst->extra;
@@ -9726,7 +9734,7 @@ static void ggml_cl_exp(ggml_backend_t backend, const ggml_tensor * src0, const 
 
     UNUSED(src1);
 
-    ggml_backend_opencl_context *backend_ctx = (ggml_backend_opencl_context *)backend->context;
+    ggml_backend_opencl_kepler_context *backend_ctx = (ggml_backend_opencl_kepler_context *)backend->context;
 
     ggml_tensor_extra_cl * extra0 = (ggml_tensor_extra_cl *)src0->extra;
     ggml_tensor_extra_cl * extrad = (ggml_tensor_extra_cl *)dst->extra;
@@ -9808,7 +9816,7 @@ static void ggml_cl_expm1(ggml_backend_t backend, const ggml_tensor * src0, cons
 
     UNUSED(src1);
 
-    ggml_backend_opencl_context *backend_ctx = (ggml_backend_opencl_context *)backend->context;
+    ggml_backend_opencl_kepler_context *backend_ctx = (ggml_backend_opencl_kepler_context *)backend->context;
 
     ggml_tensor_extra_cl * extra0 = (ggml_tensor_extra_cl *)src0->extra;
     ggml_tensor_extra_cl * extrad = (ggml_tensor_extra_cl *)dst->extra;
@@ -9904,7 +9912,7 @@ static void ggml_cl_softplus(ggml_backend_t backend, const ggml_tensor * src0, c
 
     UNUSED(src1);
 
-    ggml_backend_opencl_context *backend_ctx = (ggml_backend_opencl_context *)backend->context;
+    ggml_backend_opencl_kepler_context *backend_ctx = (ggml_backend_opencl_kepler_context *)backend->context;
 
     ggml_tensor_extra_cl * extra0 = (ggml_tensor_extra_cl *)src0->extra;
     ggml_tensor_extra_cl * extrad = (ggml_tensor_extra_cl *)dst->extra;
@@ -10001,7 +10009,7 @@ static void ggml_cl_repeat(ggml_backend_t backend, const ggml_tensor * src0, con
 
     UNUSED(src1_shape_def);
 
-    ggml_backend_opencl_context *backend_ctx = (ggml_backend_opencl_context *)backend->context;
+    ggml_backend_opencl_kepler_context *backend_ctx = (ggml_backend_opencl_kepler_context *)backend->context;
 
     ggml_tensor_extra_cl * extra0 = (ggml_tensor_extra_cl *)src0->extra;
     ggml_tensor_extra_cl * extrad  = (ggml_tensor_extra_cl *)dst->extra;
@@ -10065,7 +10073,7 @@ static void ggml_cl_pad(ggml_backend_t backend, const ggml_tensor * src0, ggml_t
     GGML_ASSERT(src0->type == GGML_TYPE_F32);
     GGML_ASSERT(dst->type == GGML_TYPE_F32);
 
-    ggml_backend_opencl_context *backend_ctx = (ggml_backend_opencl_context *)backend->context;
+    ggml_backend_opencl_kepler_context *backend_ctx = (ggml_backend_opencl_kepler_context *)backend->context;
 
     if (backend_ctx->kernel_pad == nullptr) {
         GGML_LOG_WARN("%s: pad kernel not available, skipping OpenCL execution.\n", __func__);
@@ -10160,7 +10168,7 @@ static void ggml_cl_upscale(ggml_backend_t backend, const ggml_tensor * src0, gg
     GGML_ASSERT(src0->type == GGML_TYPE_F32);
     GGML_ASSERT(dst->type == GGML_TYPE_F32);
 
-    ggml_backend_opencl_context *backend_ctx = (ggml_backend_opencl_context *)backend->context;
+    ggml_backend_opencl_kepler_context *backend_ctx = (ggml_backend_opencl_kepler_context *)backend->context;
 
     const int mode_flags        = (ggml_scale_mode) ggml_get_op_params_i32(dst, 0);
     const ggml_scale_mode mode  = (ggml_scale_mode) (mode_flags & 0xFF);
@@ -10277,7 +10285,7 @@ static void ggml_cl_concat(ggml_backend_t backend, const ggml_tensor * src0, con
     GGML_ASSERT(src1->type == GGML_TYPE_F32);
     GGML_ASSERT(dst->type == GGML_TYPE_F32);
 
-    ggml_backend_opencl_context *backend_ctx = (ggml_backend_opencl_context *)backend->context;
+    ggml_backend_opencl_kepler_context *backend_ctx = (ggml_backend_opencl_kepler_context *)backend->context;
 
     ggml_tensor_extra_cl * extra0 = (ggml_tensor_extra_cl *)src0->extra;
     ggml_tensor_extra_cl * extra1 = (ggml_tensor_extra_cl *)src1->extra;
@@ -10358,7 +10366,7 @@ static void ggml_cl_timestep_embedding(ggml_backend_t backend, const ggml_tensor
     GGML_ASSERT(src0->type == GGML_TYPE_F32);
     GGML_ASSERT(dst->type == GGML_TYPE_F32);
 
-    ggml_backend_opencl_context *backend_ctx = (ggml_backend_opencl_context *)backend->context;
+    ggml_backend_opencl_kepler_context *backend_ctx = (ggml_backend_opencl_kepler_context *)backend->context;
 
     if (backend_ctx->kernel_timestep_embedding == nullptr) {
         GGML_LOG_WARN("%s: timestep_embedding kernel not available, skipping OpenCL execution.\n", __func__);
@@ -10409,7 +10417,7 @@ static void ggml_cl_flash_attn(ggml_backend_t backend, const ggml_tensor * q, co
         GGML_ASSERT(sinks->extra);
     }
 
-    ggml_backend_opencl_context *backend_ctx = (ggml_backend_opencl_context *)backend->context;
+    ggml_backend_opencl_kepler_context *backend_ctx = (ggml_backend_opencl_kepler_context *)backend->context;
 
     const int n_q = q->ne[1];
     const int n_kv = k->ne[1];
@@ -10531,7 +10539,7 @@ static void ggml_cl_flash_attn(ggml_backend_t backend, const ggml_tensor * q, co
 }
 
 static void ggml_cl_mul_mat_f16_f32_tiled(ggml_backend_t backend, const ggml_tensor * src0, const ggml_tensor * src1, ggml_tensor * dst) {
-    ggml_backend_opencl_context *backend_ctx = (ggml_backend_opencl_context *)backend->context;
+    ggml_backend_opencl_kepler_context *backend_ctx = (ggml_backend_opencl_kepler_context *)backend->context;
 
     ggml_tensor_extra_cl * extra0 = (ggml_tensor_extra_cl *)src0->extra;
     ggml_tensor_extra_cl * extra1 = (ggml_tensor_extra_cl *)src1->extra;
@@ -10584,7 +10592,7 @@ static void ggml_cl_mul_mat_f16_f32_tiled(ggml_backend_t backend, const ggml_ten
 
 static void ggml_cl_conv_2d(ggml_backend_t backend, const ggml_tensor * src0, const ggml_tensor * src1, ggml_tensor * dst) {
     GGML_TENSOR_BINARY_OP_LOCALS;
-    ggml_backend_opencl_context *backend_ctx = (ggml_backend_opencl_context *)backend->context;
+    ggml_backend_opencl_kepler_context *backend_ctx = (ggml_backend_opencl_kepler_context *)backend->context;
 
     ggml_tensor_extra_cl * extra0 = (ggml_tensor_extra_cl *)src0->extra;
     ggml_tensor_extra_cl * extra1 = (ggml_tensor_extra_cl *)src1->extra;
@@ -10659,7 +10667,7 @@ static void ggml_cl_conv_2d(ggml_backend_t backend, const ggml_tensor * src0, co
 }
 
 static void ggml_cl_mul_mat_kq_kqv_adreno(ggml_backend_t backend, const ggml_tensor * src0, const ggml_tensor * src1, ggml_tensor * dst) {
-    ggml_backend_opencl_context *backend_ctx = (ggml_backend_opencl_context *)backend->context;
+    ggml_backend_opencl_kepler_context *backend_ctx = (ggml_backend_opencl_kepler_context *)backend->context;
 
     ggml_tensor_extra_cl * extra0 = (ggml_tensor_extra_cl *)src0->extra;
     ggml_tensor_extra_cl * extra1 = (ggml_tensor_extra_cl *)src1->extra;
@@ -10807,7 +10815,7 @@ static void ggml_cl_mul_mat_q4_1_f32_adreno(ggml_backend_t backend, const ggml_t
     GGML_ASSERT(dst);
     GGML_ASSERT(dst->extra);
 
-    ggml_backend_opencl_context *backend_ctx = (ggml_backend_opencl_context *)backend->context;
+    ggml_backend_opencl_kepler_context *backend_ctx = (ggml_backend_opencl_kepler_context *)backend->context;
 
     ggml_tensor_extra_cl * extra1 = (ggml_tensor_extra_cl *)src1->extra;
     ggml_tensor_extra_cl * extrad = (ggml_tensor_extra_cl *)dst->extra;
@@ -10987,7 +10995,7 @@ static void ggml_cl_mul_mat_q8_0_f32_adreno(ggml_backend_t backend, const ggml_t
     GGML_ASSERT(src0t == GGML_TYPE_Q8_0);
     GGML_ASSERT(src1t == GGML_TYPE_F32);
 
-    ggml_backend_opencl_context *backend_ctx = (ggml_backend_opencl_context *)backend->context;
+    ggml_backend_opencl_kepler_context *backend_ctx = (ggml_backend_opencl_kepler_context *)backend->context;
 
     ggml_tensor_extra_cl * extra1 = (ggml_tensor_extra_cl *)src1->extra;
     ggml_tensor_extra_cl * extrad = (ggml_tensor_extra_cl *)dst->extra;
@@ -11234,7 +11242,7 @@ static void ggml_cl_mul_mat_q4_k_f32_adreno(ggml_backend_t backend, const ggml_t
     GGML_ASSERT(dst);
     GGML_ASSERT(dst->extra);
 
-    ggml_backend_opencl_context *backend_ctx = (ggml_backend_opencl_context *)backend->context;
+    ggml_backend_opencl_kepler_context *backend_ctx = (ggml_backend_opencl_kepler_context *)backend->context;
 
     ggml_tensor_extra_cl * extra1 = (ggml_tensor_extra_cl *)src1->extra;
     ggml_tensor_extra_cl * extrad = (ggml_tensor_extra_cl *)dst->extra;
@@ -11420,7 +11428,7 @@ static void ggml_cl_mul_mat_q6_K_f32_adreno(ggml_backend_t backend, const ggml_t
     GGML_ASSERT(dst);
     GGML_ASSERT(dst->extra);
 
-    ggml_backend_opencl_context *backend_ctx = (ggml_backend_opencl_context *)backend->context;
+    ggml_backend_opencl_kepler_context *backend_ctx = (ggml_backend_opencl_kepler_context *)backend->context;
 
     ggml_tensor_extra_cl_q6_K * extra0_q6_K = (ggml_tensor_extra_cl_q6_K *)src0->extra;
     ggml_tensor_extra_cl * extra1 = (ggml_tensor_extra_cl *)src1->extra;
@@ -11612,7 +11620,7 @@ static void ggml_cl_mul_mat(ggml_backend_t backend, const ggml_tensor * src0, co
     const enum ggml_type src0t = src0 ? src0->type : GGML_TYPE_COUNT;
     const enum ggml_type src1t = src1 ? src1->type : GGML_TYPE_COUNT;
 
-    ggml_backend_opencl_context *backend_ctx = (ggml_backend_opencl_context *)backend->context;
+    ggml_backend_opencl_kepler_context *backend_ctx = (ggml_backend_opencl_kepler_context *)backend->context;
 
     ggml_tensor_extra_cl * extra0 = (ggml_tensor_extra_cl *)src0->extra;
     ggml_tensor_extra_cl * extra1 = (ggml_tensor_extra_cl *)src1->extra;
@@ -13045,7 +13053,7 @@ static void ggml_cl_mul_mat_id(ggml_backend_t backend, const ggml_tensor * src0,
     GGML_ASSERT(src2);
     GGML_ASSERT(src2->extra);
 
-    ggml_backend_opencl_context *backend_ctx = (ggml_backend_opencl_context *)backend->context;
+    ggml_backend_opencl_kepler_context *backend_ctx = (ggml_backend_opencl_kepler_context *)backend->context;
 
     ggml_tensor_extra_cl * extra0 = (ggml_tensor_extra_cl *)src0->extra;
     ggml_tensor_extra_cl * extra1 = (ggml_tensor_extra_cl *)src1->extra;
@@ -13438,7 +13446,7 @@ static void ggml_cl_scale(ggml_backend_t backend, const ggml_tensor * src0, cons
 
     GGML_ASSERT(ggml_is_contiguous(src0));
 
-    ggml_backend_opencl_context *backend_ctx = (ggml_backend_opencl_context *)backend->context;
+    ggml_backend_opencl_kepler_context *backend_ctx = (ggml_backend_opencl_kepler_context *)backend->context;
 
     float scale;
     float bias;
@@ -13498,7 +13506,7 @@ static void ggml_cl_cpy(ggml_backend_t backend, const ggml_tensor * src0, const 
     const enum ggml_type src0t = src0->type;
     const enum ggml_type src1t = src1->type;
 
-    ggml_backend_opencl_context *backend_ctx = (ggml_backend_opencl_context *)backend->context;
+    ggml_backend_opencl_kepler_context *backend_ctx = (ggml_backend_opencl_kepler_context *)backend->context;
 
     ggml_tensor_extra_cl * extra0 = (ggml_tensor_extra_cl *)src0->extra;
     ggml_tensor_extra_cl * extra1 = (ggml_tensor_extra_cl *)src1->extra;
@@ -13598,7 +13606,7 @@ static void ggml_cl_set(ggml_backend_t backend, const ggml_tensor * src0, const 
     GGML_TENSOR_LOCALS(int,      ne,  dst,  ne);
     GGML_TENSOR_LOCALS(cl_ulong, nb,  dst,  nb);
 
-    ggml_backend_opencl_context *backend_ctx = (ggml_backend_opencl_context *)backend->context;
+    ggml_backend_opencl_kepler_context *backend_ctx = (ggml_backend_opencl_kepler_context *)backend->context;
 
     ggml_tensor_extra_cl * extra1 = (ggml_tensor_extra_cl *)src1->extra;
     ggml_tensor_extra_cl * extrad = (ggml_tensor_extra_cl *)dst->extra;
@@ -13677,7 +13685,7 @@ static void ggml_cl_diag_mask_inf(ggml_backend_t backend, const ggml_tensor * sr
     const int  ne01 = src0 ? src0->ne[1] : 0;
     const int  ne02 = src0 ? src0->ne[2] : 0;
 
-    ggml_backend_opencl_context *backend_ctx = (ggml_backend_opencl_context *)backend->context;
+    ggml_backend_opencl_kepler_context *backend_ctx = (ggml_backend_opencl_kepler_context *)backend->context;
 
     ggml_tensor_extra_cl * extra0 = (ggml_tensor_extra_cl *)src0->extra;
     ggml_tensor_extra_cl * extrad = (ggml_tensor_extra_cl *)dst->extra;
@@ -13733,7 +13741,7 @@ static void ggml_cl_diag(ggml_backend_t backend, const ggml_tensor * src0, const
 
     UNUSED(src1);
 
-    ggml_backend_opencl_context *backend_ctx = (ggml_backend_opencl_context *)backend->context;
+    ggml_backend_opencl_kepler_context *backend_ctx = (ggml_backend_opencl_kepler_context *)backend->context;
 
     ggml_tensor_extra_cl * extra0 = (ggml_tensor_extra_cl *)src0->extra;
     ggml_tensor_extra_cl * extrad = (ggml_tensor_extra_cl *)dst->extra;
@@ -13788,7 +13796,7 @@ static void ggml_cl_soft_max(ggml_backend_t backend, const ggml_tensor * src0, c
         GGML_ASSERT(src2->extra);
     }
 
-    ggml_backend_opencl_context *backend_ctx = (ggml_backend_opencl_context *)backend->context;
+    ggml_backend_opencl_kepler_context *backend_ctx = (ggml_backend_opencl_kepler_context *)backend->context;
 
     ggml_tensor_extra_cl * extra0 = (ggml_tensor_extra_cl *)src0->extra;
     ggml_tensor_extra_cl * extrad = (ggml_tensor_extra_cl *)dst->extra;
@@ -13904,7 +13912,7 @@ static void ggml_cl_rope(ggml_backend_t backend, const ggml_tensor * src0, const
     GGML_ASSERT(dst);
     GGML_ASSERT(dst->extra);
 
-    ggml_backend_opencl_context *backend_ctx = (ggml_backend_opencl_context *)backend->context;
+    ggml_backend_opencl_kepler_context *backend_ctx = (ggml_backend_opencl_kepler_context *)backend->context;
 
     ggml_tensor_extra_cl * extra0 = (ggml_tensor_extra_cl *)src0->extra;
     ggml_tensor_extra_cl * extra1 = (ggml_tensor_extra_cl *)src1->extra;
@@ -14087,7 +14095,7 @@ static void ggml_cl_solve_tri(ggml_backend_t backend, const ggml_tensor * src0, 
     GGML_ASSERT(dst);
     GGML_ASSERT(dst->extra);
 
-    ggml_backend_opencl_context *backend_ctx = (ggml_backend_opencl_context *)backend->context;
+    ggml_backend_opencl_kepler_context *backend_ctx = (ggml_backend_opencl_kepler_context *)backend->context;
 
     ggml_tensor_extra_cl * extra0 = (ggml_tensor_extra_cl *)src0->extra;
     ggml_tensor_extra_cl * extra1 = (ggml_tensor_extra_cl *)src1->extra;
@@ -14156,7 +14164,7 @@ static void ggml_cl_im2col(ggml_backend_t backend, const ggml_tensor * src0, con
     GGML_ASSERT(src1->type == GGML_TYPE_F32);
     GGML_ASSERT(dst->type == GGML_TYPE_F16 || dst->type == GGML_TYPE_F32);
 
-    ggml_backend_opencl_context *backend_ctx = (ggml_backend_opencl_context *)backend->context;
+    ggml_backend_opencl_kepler_context *backend_ctx = (ggml_backend_opencl_kepler_context *)backend->context;
 
     ggml_tensor_extra_cl * extra1 = (ggml_tensor_extra_cl *)src1->extra;
     ggml_tensor_extra_cl * extrad = (ggml_tensor_extra_cl *)dst->extra;
@@ -14239,7 +14247,7 @@ static void ggml_cl_argsort(ggml_backend_t backend, const ggml_tensor * src0, co
     GGML_ASSERT( dst->type == GGML_TYPE_I32);
     GGML_ASSERT(ggml_is_contiguous(src0));
 
-    ggml_backend_opencl_context *backend_ctx = (ggml_backend_opencl_context *)backend->context;
+    ggml_backend_opencl_kepler_context *backend_ctx = (ggml_backend_opencl_kepler_context *)backend->context;
 
     ggml_tensor_extra_cl * extra0 = (ggml_tensor_extra_cl *)src0->extra;
     ggml_tensor_extra_cl * extrad = (ggml_tensor_extra_cl *)dst->extra;
@@ -14283,7 +14291,7 @@ static void ggml_cl_sum_rows(ggml_backend_t backend, const ggml_tensor * src0, c
 
     GGML_ASSERT(src0->nb[0] == ggml_type_size(src0->type));
 
-    ggml_backend_opencl_context *backend_ctx = (ggml_backend_opencl_context *)backend->context;
+    ggml_backend_opencl_kepler_context *backend_ctx = (ggml_backend_opencl_kepler_context *)backend->context;
 
     ggml_tensor_extra_cl * extra0 = (ggml_tensor_extra_cl *)src0->extra;
     ggml_tensor_extra_cl * extrad = (ggml_tensor_extra_cl *)dst->extra;
@@ -14344,7 +14352,7 @@ static void ggml_cl_cumsum(ggml_backend_t backend, const ggml_tensor * src0, con
     GGML_ASSERT(src0->nb[0] == ggml_type_size(src0->type));
     GGML_ASSERT(ggml_is_contiguous(src0));
 
-    ggml_backend_opencl_context *backend_ctx = (ggml_backend_opencl_context *)backend->context;
+    ggml_backend_opencl_kepler_context *backend_ctx = (ggml_backend_opencl_kepler_context *)backend->context;
 
     ggml_tensor_extra_cl * extra0 = (ggml_tensor_extra_cl *)src0->extra;
     ggml_tensor_extra_cl * extrad = (ggml_tensor_extra_cl *)dst->extra;
@@ -14460,7 +14468,7 @@ static void ggml_cl_glu(ggml_backend_t backend, const ggml_tensor * src0, const 
         GGML_ASSERT(ggml_are_same_shape(src0, src1));
     }
 
-    ggml_backend_opencl_context *backend_ctx = (ggml_backend_opencl_context *)backend->context;
+    ggml_backend_opencl_kepler_context *backend_ctx = (ggml_backend_opencl_kepler_context *)backend->context;
 
     cl_kernel kernel;
     switch (ggml_get_glu_op(dst)) {
@@ -14564,7 +14572,7 @@ typedef void (*ggml_cl_func_t)(ggml_backend_t backend, const ggml_tensor * src0,
 
 bool ggml_cl_compute_forward(ggml_backend_t backend, struct ggml_tensor * tensor) {
     ggml_cl_func_t func = nullptr;
-    ggml_backend_opencl_context * backend_ctx = (ggml_backend_opencl_context *) backend->context;
+    ggml_backend_opencl_kepler_context * backend_ctx = (ggml_backend_opencl_kepler_context *) backend->context;
 
     ggml_tensor * src0 = tensor->src[0];
     ggml_tensor * src1 = tensor->src[1];

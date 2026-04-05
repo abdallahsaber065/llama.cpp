@@ -273,11 +273,13 @@ llama_context::llama_context(
     // init the memory module
     if (!hparams.vocab_only) {
         for (auto * dev : model.devices) {
-            if (strcmp(ggml_backend_dev_name(dev), "GPUOpenCL") != 0) {
+            const char * dev_nm = ggml_backend_dev_name(dev);
+            if (strcmp(dev_nm, "GPUOpenCL") != 0 && strcmp(dev_nm, "GPUOpenCLKepler") != 0) {
                 continue;
             }
             const char * desc = ggml_backend_dev_description(dev);
-            if (!desc || strstr(desc, "[fork_kepler_opencl]") == nullptr) {
+            if (!desc ||
+                (strstr(desc, "[fork_kepler_opencl]") == nullptr && strstr(desc, "[opencl_kepler]") == nullptr)) {
                 continue;
             }
             if (strstr(desc, "[opencl_legacy_no_fp16]") != nullptr) {

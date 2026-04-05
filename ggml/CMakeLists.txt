@@ -277,6 +277,11 @@ if (GGML_OPENCL_LEGACY_NVIDIA)
     endif()
 endif()
 
+option(GGML_OPENCL_KEPLER "ggml: dedicated OpenCL backend for NVIDIA Kepler (e.g. K3100M); mutually exclusive with GGML_OPENCL" OFF)
+if (GGML_OPENCL_KEPLER AND GGML_OPENCL)
+    message(FATAL_ERROR "GGML_OPENCL_KEPLER=ON cannot be used together with GGML_OPENCL=ON. Disable one.")
+endif ()
+
 option(GGML_HEXAGON                         "ggml: enable Hexagon backend"                    OFF)
 set(GGML_HEXAGON_FP32_QUANTIZE_GROUP_SIZE 128 CACHE STRING "ggml: quantize group size (32, 64, or 128)")
 
@@ -350,6 +355,7 @@ set(GGML_PUBLIC_HEADERS
     include/ggml-webgpu.h
     include/ggml-zendnn.h
     include/ggml-openvino.h
+    include/ggml-opencl-kepler.h
     include/gguf.h)
 
 set_target_properties(ggml PROPERTIES PUBLIC_HEADER "${GGML_PUBLIC_HEADERS}")
