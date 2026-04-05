@@ -52,7 +52,7 @@ However, A6x GPUs in phones are likely not supported due to the outdated driver 
 
 This fork also includes a conservative compatibility path for older NVIDIA OpenCL stacks. It is intended for legacy GPUs such as Kepler-class mobile Quadro parts that cannot use the modern CUDA backend.
 
-This path does **not** run the full upstream Adreno/subgroup OpenCL stack. It keeps the modern `ggml-backend` integration, uses raw packed tensor buffers, offloads `MUL_MAT` through CLBlast, and adds a small **OpenCL 1.2 / FP32 / subgroup-free** program (`legacy_core.cl`) for common transformer ops so more of the graph can stay on the GPU. Anything not listed below still falls back to the CPU backend via the scheduler.
+This path still loads CLBlast, `set_rows`, and a small **OpenCL 1.2 / FP32 / subgroup-free** program (`legacy_core.cl`) for common transformer ops. It then runs the same **`load_cl_kernels` pass** as the modern backend, compiled for OpenCL C 1.2: programs that fail to build are **skipped** (logged, null program/kernel) instead of aborting the process, so whatever your driver accepts can run on GPU. Scheduling uses the **standard** `supports_op` rules for those ops; `MUL_MAT` remains on the CLBlast + legacy GEMM path when `ggml_opencl_can_mul_mat_legacy` allows it. Anything the driver cannot compile or the backend does not advertise stays on CPU via the scheduler.
 
 **CLBlast scope:** CLBlast provides BLAS-style routines (for example `GEMM`). Custom kernels cover the non-BLAS ops below; other `GGML_OP` types remain unsupported on GPU until implemented.
 
@@ -60,7 +60,8 @@ This path does **not** run the full upstream Adreno/subgroup OpenCL stack. It ke
 
 | Op | Notes |
 |----|--------|
-| `MUL_MAT` | CLBlast + dequant (existing path) |
+| `MUL_MAT` | CLBlast + dequant when it succeeds; otherwise native FP32 GEMM in `legacy_core.cl` (same GPU, slower). Set `GGML_OPENCL_LEGACY_NATIVE_GEMM=1` to skip CLBlast. Init runs `clblast::FillCache`. |
+| `GET_ROWS` | F32 / Q4_0 / Q6_K source rows → F32 dst; indices `I32`; contiguous; `ne[0]` divisible by 32 (Q4_0) or 256 (Q6_K). |
 | `SET_ROWS` | Existing path; F16 only with `cl_khr_fp16` |
 | `RMS_NORM` | F32, contiguous |
 | `ROPE` | Normal / NeoX only; not MROPE, vision, or IMROPE |
@@ -87,7 +88,7 @@ Current focus of the compatibility path:
 | OpenCL 1.2 init path  | Support |
 | CLBlast GEMM backend  | Support |
 | `MUL_MAT` offload     | Support |
-| Legacy core F32 ops   | Partial (see table above) |
+| Legacy core F32 ops   | Partial (see table above); plus optional standard kernels if they compile |
 | `MUL_MAT_ID` offload  | CPU fallback |
 | Subgroup kernels      | Disabled |
 

@@ -26,10 +26,11 @@ Runtime behavior changes:
 
 - NVIDIA OpenCL devices are no longer rejected outright,
 - OpenCL 1.2 is accepted for the legacy NVIDIA path,
-- subgroup-heavy modern OpenCL kernels are skipped in that path,
-- validated `MUL_MAT` workloads use CLBlast,
+- after the CLBlast + `legacy_core` bootstrap, the backend still attempts the full `load_cl_kernels` compile pass at OpenCL C 1.2; builds that fail are skipped (no abort) so subgroup-heavy or driver-fragile sources simply leave null kernels,
+- validated `MUL_MAT` workloads use CLBlast when the driver accepts CLBlast’s generated programs; otherwise the same path falls back to a native FP32 GEMM kernel on GPU (optional `GGML_OPENCL_LEGACY_NATIVE_GEMM=1` forces that),
+- `GET_ROWS` (embeddings) for F32 / Q4_0 / Q6_K runs on GPU in `legacy_core.cl` so small models like Gemma / Qwen are not stuck on CPU for the gather alone,
 - when a single FP32 dequant buffer would exceed `CL_DEVICE_MAX_MEM_ALLOC_SIZE`, `MUL_MAT` is split into column slices (still on GPU) instead of failing with OpenCL allocation errors,
-- unsupported ops stay on CPU through the scheduler fallback path (log gaps with `GGML_OPENCL_LEGACY_OP_INVENTORY=1`).
+- ops beyond CLBlast `MUL_MAT` use the same scheduling matrix as the standard OpenCL backend when the corresponding kernel compiled; unsupported or uncompiled ops stay on CPU (log gaps with `GGML_OPENCL_LEGACY_OP_INVENTORY=1`).
 - OpenCL devices in legacy mode report `[fork_kepler_opencl]` in `ggml_backend_dev_description`. Without `cl_khr_fp16`, `[opencl_legacy_no_fp16]` is added; `llama_context` promotes K/V to F32 and disables Flash Attention so attention uses the decomposed GPU path where supported.
 - KV cache is no longer forced to CPU solely for F16 on tagged fork devices (F32 K/V is used when the device has no FP16 extension).
 - Shared `cl_context` lifetime: the backend does **not** call `clReleaseContext` when the last `ggml_backend` is freed (default). The first probe creates one shared context for all enumerated devices; `ggml_cl2_init` returns a cached `backend_ctx`, so releasing the context during model load/teardown left stale handles and could trigger `CL_INVALID_CONTEXT` (-34) on legacy NVIDIA drivers. The context is released at process exit. Set `GGML_OPENCL_RELEASE_CONTEXT=1` only if you want explicit release in the same process (reload without restart may fail).

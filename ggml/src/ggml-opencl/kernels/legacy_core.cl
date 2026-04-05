@@ -345,3 +345,229 @@ kernel void kernel_legacy_rope_f32(
         }
     }
 }
+
+//------------------------------------------------------------------------------
+// FP16 storage bits -> float (no cl_khr_fp16)
+//------------------------------------------------------------------------------
+float legacy_f16_as_f32(ushort h) {
+    uint s = (uint)(h >> 15);
+    uint e = (uint)((h >> 10) & 31u);
+    uint m = (uint)(h & 1023u);
+    uint u;
+    if (e == 0u) {
+        if (m == 0u) {
+            u = s << 31;
+        } else {
+            e = 1u;
+            while ((m & 0x400u) == 0u) {
+                m <<= 1u;
+                e--;
+            }
+            m &= 0x3ffu;
+            u = (s << 31) | ((e + (127u - 15u)) << 23) | (m << 13);
+        }
+    } else if (e == 31u) {
+        u = (s << 31) | (255u << 23) | (m << 13);
+    } else {
+        u = (s << 31) | ((e + (127u - 15u)) << 23) | (m << 13);
+    }
+    return as_float(u);
+}
+
+//------------------------------------------------------------------------------
+// Native FP32 GEMM: C (M x N, col-major, ldc) = (A^T) * B
+// A is K x M stored col-major (lda = K), B is K x N (ldb = K).
+//------------------------------------------------------------------------------
+kernel void kernel_legacy_gemm_f32(
+        global const float * A, ulong offA,
+        global const float * B, ulong offB,
+        global float * C, ulong offC,
+        int K, int M, int N, int ldc
+) {
+    A = (global const float *)((global const char *)A + offA);
+    B = (global const float *)((global const char *)B + offB);
+    C = (global float *)((global char *)C + offC);
+
+    size_t im = get_global_id(0);
+    size_t jn = get_global_id(1);
+    if (im >= (size_t)M || jn >= (size_t)N) {
+        return;
+    }
+    float sum = 0.0f;
+    for (int k = 0; k < K; ++k) {
+        sum += A[(size_t)k + im * (size_t)K] * B[(size_t)k + jn * (size_t)K];
+    }
+    C[im + jn * (size_t)ldc] = sum;
+}
+
+//------------------------------------------------------------------------------
+// get_rows (token embedding gather) — FP32 / Q4_0 / Q6_K, no half extension
+//------------------------------------------------------------------------------
+kernel void kernel_legacy_get_rows_f32(
+        global void * src0,
+        ulong offset0,
+        global int * src1,
+        ulong offset1,
+        global float * dst,
+        ulong offsetd,
+        int ne00,
+        ulong nb01,
+        ulong nb02,
+        ulong nb03,
+        int ne10,
+        ulong nb10,
+        ulong nb11,
+        ulong nb12,
+        ulong nb1,
+        ulong nb2,
+        ulong nb3
+) {
+    src0 = (global void *)((global char *)src0 + offset0);
+    src1 = (global int *)((global char *)src1 + offset1);
+    dst = (global float *)((global char *)dst + offsetd);
+
+    int i10 = get_group_id(0);
+    int i11 = get_group_id(1);
+    int i12 = get_group_id(2);
+
+    int r = ((global int *)((global char *)src1 + i12 * nb12 + i11 * nb11 + i10 * nb10))[0];
+
+    int i02 = i11;
+    int i03 = i12;
+
+    for (int ind = get_local_id(0); ind < ne00; ind += get_local_size(0)) {
+        ((global float *)((global char *)dst + i12 * nb3 + i11 * nb2 + i10 * nb1))[ind] =
+            ((global float *)((global char *)src0 + r * nb01 + i02 * nb02 + i03 * nb03))[ind];
+    }
+}
+
+#define QK4_0_GR 32
+struct __attribute__((packed)) block_q4_0_gr {
+    ushort d;
+    uchar qs[QK4_0_GR / 2];
+};
+
+kernel void kernel_legacy_get_rows_q4_0(
+        global void * src0,
+        ulong offset0,
+        global int * src1,
+        ulong offset1,
+        global float * dst,
+        ulong offsetd,
+        int ne00,
+        ulong nb01,
+        ulong nb02,
+        ulong nb03,
+        int ne10,
+        ulong nb10,
+        ulong nb11,
+        ulong nb12,
+        ulong nb1,
+        ulong nb2,
+        ulong nb3
+) {
+    src0 = (global void *)((global char *)src0 + offset0);
+    src1 = (global int *)((global char *)src1 + offset1);
+    dst = (global float *)((global char *)dst + offsetd);
+
+    int i10 = get_group_id(0);
+    int i11 = get_group_id(1);
+    int i12 = get_group_id(2);
+
+    int r = ((global int *)((global char *)src1 + i12 * nb12 + i11 * nb11 + i10 * nb10))[0];
+
+    int i02 = i11;
+    int i03 = i12;
+
+    global char * row_base = (global char *)src0 + r * nb01 + i02 * nb02 + i03 * nb03;
+    global float * drow = (global float *)((global char *)dst + i12 * nb3 + i11 * nb2 + i10 * nb1);
+
+    for (int t = get_local_id(0); t < ne00; t += get_local_size(0)) {
+        int ib = t / QK4_0_GR;
+        int jrem = t - ib * QK4_0_GR;
+        global struct block_q4_0_gr * bl = (global struct block_q4_0_gr *)(row_base + (size_t)ib * sizeof(struct block_q4_0_gr));
+        float d = legacy_f16_as_f32(bl->d);
+        uchar vui = bl->qs[jrem / 2];
+        float v = (jrem & 1) == 0
+            ? (((float)(vui & (uchar)15)) - 8.0f) * d
+            : (((float)(vui >> 4)) - 8.0f) * d;
+        drow[t] = v;
+    }
+}
+
+#define QK_K_GR 256
+
+typedef struct __attribute__((packed)) {
+    uchar ql[128];
+    uchar qh[64];
+    char scales[16];
+    ushort d;
+} block_q6_K_gr;
+
+kernel void kernel_legacy_get_rows_q6_k(
+        global void * src0,
+        ulong offset0,
+        global int * src1,
+        ulong offset1,
+        global float * dst,
+        ulong offsetd,
+        int ne00,
+        ulong nb01,
+        ulong nb02,
+        ulong nb03,
+        int ne10,
+        ulong nb10,
+        ulong nb11,
+        ulong nb12,
+        ulong nb1,
+        ulong nb2,
+        ulong nb3
+) {
+    src0 = (global void *)((global char *)src0 + offset0);
+    src1 = (global int *)((global char *)src1 + offset1);
+    dst = (global float *)((global char *)dst + offsetd);
+
+    int i10 = get_group_id(0);
+    int i11 = get_group_id(1);
+    int i12 = get_group_id(2);
+
+    int r = ((global int *)((global char *)src1 + i12 * nb12 + i11 * nb11 + i10 * nb10))[0];
+
+    int i02 = i11;
+    int i03 = i12;
+
+    if (get_local_id(0) != 0) {
+        return;
+    }
+
+    global const block_q6_K_gr * x = (global const block_q6_K_gr *)((global char *)src0 + r * nb01 + i02 * nb02 + i03 * nb03);
+    global float * y_base = (global float *)((global char *)dst + i12 * nb3 + i11 * nb2 + i10 * nb1);
+
+    const int nb = ne00 / QK_K_GR;
+
+    for (int i = 0; i < nb; i++) {
+        const float d_sc = legacy_f16_as_f32(x[i].d);
+        global float * y = y_base + i * QK_K_GR;
+        global const uchar * ql = x[i].ql;
+        global const uchar * qh = x[i].qh;
+        global const char * sc = x[i].scales;
+
+        for (int n = 0; n < QK_K_GR; n += 128) {
+            for (int l = 0; l < 32; ++l) {
+                int is = l / 16;
+                int q1 = (int)((char)((ql[l + 0] & (uchar)15) | (((qh[l] >> 0) & (uchar)3) << 4)) - 32);
+                int q2 = (int)((char)((ql[l + 32] & (uchar)15) | (((qh[l] >> 2) & (uchar)3) << 4)) - 32);
+                int q3 = (int)((char)((ql[l + 0] >> 4) | (((qh[l] >> 4) & (uchar)3) << 4)) - 32);
+                int q4 = (int)((char)((ql[l + 32] >> 4) | (((qh[l] >> 6) & (uchar)3) << 4)) - 32);
+                y[l + 0]  = d_sc * (float)sc[is + 0] * (float)q1;
+                y[l + 32] = d_sc * (float)sc[is + 2] * (float)q2;
+                y[l + 64] = d_sc * (float)sc[is + 4] * (float)q3;
+                y[l + 96] = d_sc * (float)sc[is + 6] * (float)q4;
+            }
+            y += 128;
+            ql += 64;
+            qh += 32;
+            sc += 8;
+        }
+    }
+}

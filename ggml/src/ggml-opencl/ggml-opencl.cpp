@@ -446,6 +446,10 @@ struct ggml_backend_opencl_context {
     cl_kernel  kernel_legacy_gelu_f32 = nullptr;
     cl_kernel  kernel_legacy_softmax_f32 = nullptr;
     cl_kernel  kernel_legacy_rope_f32 = nullptr;
+    cl_kernel  kernel_legacy_gemm_f32 = nullptr;
+    cl_kernel  kernel_legacy_get_rows_f32 = nullptr;
+    cl_kernel  kernel_legacy_get_rows_q4_0 = nullptr;
+    cl_kernel  kernel_legacy_get_rows_q6_k = nullptr;
 #endif
 
     // prealloc buffers for transposing weights and activations
@@ -801,6 +805,9 @@ inline std::string read_file(const std::string &path) {
   return text;
 }
 
+// When set, failed program creation/build returns nullptr instead of aborting (optional kernels on legacy NVIDIA).
+static thread_local bool g_ggml_opencl_relaxed_program_build = false;
+
 static cl_program build_program_from_source(cl_context ctx, cl_device_id dev, const char* program_buffer, const std::string &compile_opts) {
     cl_program p;
     char *program_log;
@@ -811,19 +818,26 @@ static cl_program build_program_from_source(cl_context ctx, cl_device_id dev, co
     program_size = strlen(program_buffer);
 
     p = clCreateProgramWithSource(ctx, 1, (const char**)&program_buffer, &program_size, &err);
-    if(err < 0) {
+    if (err < 0) {
         GGML_LOG_ERROR("OpenCL error creating program");
+        if (g_ggml_opencl_relaxed_program_build) {
+            return nullptr;
+        }
         exit(1);
     }
 
     err = clBuildProgram(p, 0, NULL, compile_opts.c_str(), NULL, NULL);
-    if(err < 0) {
+    if (err < 0) {
         clGetProgramBuildInfo(p, dev, CL_PROGRAM_BUILD_LOG, 0, NULL, &log_size);
         program_log = (char*) malloc(log_size + 1);
         program_log[log_size] = '\0';
         clGetProgramBuildInfo(p, dev, CL_PROGRAM_BUILD_LOG, log_size + 1, program_log, NULL);
         GGML_LOG_ERROR("ggml_opencl: kernel compile error:\n\n%s\n", program_log);
         free(program_log);
+        if (g_ggml_opencl_relaxed_program_build) {
+            clReleaseProgram(p);
+            return nullptr;
+        }
         exit(1);
     }
 
@@ -1090,6 +1104,10 @@ static void load_legacy_core_kernels(ggml_backend_opencl_context * backend_ctx, 
     CL_CHECK((backend_ctx->kernel_legacy_gelu_f32          = clCreateKernel(backend_ctx->program_legacy_core, "kernel_legacy_gelu_f32",          &err), err));
     CL_CHECK((backend_ctx->kernel_legacy_softmax_f32       = clCreateKernel(backend_ctx->program_legacy_core, "kernel_legacy_softmax_f32",       &err), err));
     CL_CHECK((backend_ctx->kernel_legacy_rope_f32          = clCreateKernel(backend_ctx->program_legacy_core, "kernel_legacy_rope_f32",          &err), err));
+    CL_CHECK((backend_ctx->kernel_legacy_gemm_f32          = clCreateKernel(backend_ctx->program_legacy_core, "kernel_legacy_gemm_f32",          &err), err));
+    CL_CHECK((backend_ctx->kernel_legacy_get_rows_f32      = clCreateKernel(backend_ctx->program_legacy_core, "kernel_legacy_get_rows_f32",      &err), err));
+    CL_CHECK((backend_ctx->kernel_legacy_get_rows_q4_0     = clCreateKernel(backend_ctx->program_legacy_core, "kernel_legacy_get_rows_q4_0",     &err), err));
+    CL_CHECK((backend_ctx->kernel_legacy_get_rows_q6_k     = clCreateKernel(backend_ctx->program_legacy_core, "kernel_legacy_get_rows_q6_k",     &err), err));
 }
 
 static void ggml_opencl_legacy_op_inventory_log(const struct ggml_tensor * op) {
@@ -1126,6 +1144,11 @@ static bool ggml_opencl_use_legacy_nvidia(const ggml_backend_opencl_context * ba
 static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx, ggml_cl_version opencl_c_version) {
     cl_int err;
 
+    const bool prev_relaxed = g_ggml_opencl_relaxed_program_build;
+    if (backend_ctx->legacy_nvidia) {
+        g_ggml_opencl_relaxed_program_build = true;
+    }
+
     // compiler options for general kernels
     auto opencl_c_std =
         std::string("CL") + std::to_string(opencl_c_version.major) + "." + std::to_string(opencl_c_version.minor);
@@ -1151,10 +1174,10 @@ static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx, ggml_cl_ve
         backend_ctx->program_add =
             build_program_from_source(backend_ctx->context, backend_ctx->device, kernel_src.c_str(), compile_opts);
 
-        CL_CHECK((backend_ctx->kernel_add         = clCreateKernel(backend_ctx->program_add, "kernel_add", &err), err));
-        CL_CHECK((backend_ctx->kernel_add_row     = clCreateKernel(backend_ctx->program_add, "kernel_add_row", &err), err));
-        CL_CHECK((backend_ctx->kernel_add_f16     = clCreateKernel(backend_ctx->program_add, "kernel_add_f16", &err), err));
-        CL_CHECK((backend_ctx->kernel_add_row_f16 = clCreateKernel(backend_ctx->program_add, "kernel_add_row_f16", &err), err));
+        if (backend_ctx->program_add) { CL_CHECK((backend_ctx->kernel_add = clCreateKernel(backend_ctx->program_add, "kernel_add", &err), err)); } else { backend_ctx->kernel_add = nullptr; }
+        if (backend_ctx->program_add) { CL_CHECK((backend_ctx->kernel_add_row = clCreateKernel(backend_ctx->program_add, "kernel_add_row", &err), err)); } else { backend_ctx->kernel_add_row = nullptr; }
+        if (backend_ctx->program_add) { CL_CHECK((backend_ctx->kernel_add_f16 = clCreateKernel(backend_ctx->program_add, "kernel_add_f16", &err), err)); } else { backend_ctx->kernel_add_f16 = nullptr; }
+        if (backend_ctx->program_add) { CL_CHECK((backend_ctx->kernel_add_row_f16 = clCreateKernel(backend_ctx->program_add, "kernel_add_row_f16", &err), err)); } else { backend_ctx->kernel_add_row_f16 = nullptr; }
         GGML_LOG_CONT(".");
     }
 
@@ -1170,7 +1193,7 @@ static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx, ggml_cl_ve
         backend_ctx->program_add_id =
             build_program_from_source(backend_ctx->context, backend_ctx->device, kernel_src.c_str(), compile_opts);
 
-        CL_CHECK((backend_ctx->kernel_add_id = clCreateKernel(backend_ctx->program_add_id, "kernel_add_id", &err), err));
+        if (backend_ctx->program_add_id) { CL_CHECK((backend_ctx->kernel_add_id = clCreateKernel(backend_ctx->program_add_id, "kernel_add_id", &err), err)); } else { backend_ctx->kernel_add_id = nullptr; }
         GGML_LOG_CONT(".");
     }
 
@@ -1186,7 +1209,7 @@ static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx, ggml_cl_ve
         cl_program prog =
             build_program_from_source(backend_ctx->context, backend_ctx->device, kernel_src.c_str(), compile_opts);
 
-        CL_CHECK((backend_ctx->kernel_tri = clCreateKernel(prog, "kernel_tri_f32", &err), err));
+        if (prog) { CL_CHECK((backend_ctx->kernel_tri = clCreateKernel(prog, "kernel_tri_f32", &err), err)); } else { backend_ctx->kernel_tri = nullptr; }
         GGML_LOG_CONT(".");
 
         CL_CHECK(clReleaseProgram(prog));
@@ -1204,7 +1227,7 @@ static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx, ggml_cl_ve
         cl_program prog =
             build_program_from_source(backend_ctx->context, backend_ctx->device, kernel_src.c_str(), compile_opts);
 
-        CL_CHECK((backend_ctx->kernel_fill = clCreateKernel(prog, "kernel_fill_f32", &err), err));
+        if (prog) { CL_CHECK((backend_ctx->kernel_fill = clCreateKernel(prog, "kernel_fill_f32", &err), err)); } else { backend_ctx->kernel_fill = nullptr; }
         GGML_LOG_CONT(".");
 
         CL_CHECK(clReleaseProgram(prog));
@@ -1222,7 +1245,7 @@ static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx, ggml_cl_ve
         backend_ctx->program_clamp =
             build_program_from_source(backend_ctx->context, backend_ctx->device, kernel_src.c_str(), compile_opts);
 
-        CL_CHECK((backend_ctx->kernel_clamp = clCreateKernel(backend_ctx->program_clamp, "kernel_clamp", &err), err));
+        if (backend_ctx->program_clamp) { CL_CHECK((backend_ctx->kernel_clamp = clCreateKernel(backend_ctx->program_clamp, "kernel_clamp", &err), err)); } else { backend_ctx->kernel_clamp = nullptr; }
         GGML_LOG_CONT(".");
     }
 
@@ -1238,11 +1261,11 @@ static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx, ggml_cl_ve
         cl_program prog =
             build_program_from_source(backend_ctx->context, backend_ctx->device, kernel_src.c_str(), compile_opts);
 
-        CL_CHECK((backend_ctx->kernel_cpy_f16_f16 = clCreateKernel(prog, "kernel_cpy_f16_f16", &err), err));
-        CL_CHECK((backend_ctx->kernel_cpy_f16_f32 = clCreateKernel(prog, "kernel_cpy_f16_f32", &err), err));
-        CL_CHECK((backend_ctx->kernel_cpy_f32_f16 = clCreateKernel(prog, "kernel_cpy_f32_f16", &err), err));
-        CL_CHECK((backend_ctx->kernel_cpy_f32_f32 = clCreateKernel(prog, "kernel_cpy_f32_f32", &err), err));
-        CL_CHECK((backend_ctx->kernel_cpy_i32_i32 = clCreateKernel(prog, "kernel_cpy_i32_i32", &err), err));
+        if (prog) { CL_CHECK((backend_ctx->kernel_cpy_f16_f16 = clCreateKernel(prog, "kernel_cpy_f16_f16", &err), err)); } else { backend_ctx->kernel_cpy_f16_f16 = nullptr; }
+        if (prog) { CL_CHECK((backend_ctx->kernel_cpy_f16_f32 = clCreateKernel(prog, "kernel_cpy_f16_f32", &err), err)); } else { backend_ctx->kernel_cpy_f16_f32 = nullptr; }
+        if (prog) { CL_CHECK((backend_ctx->kernel_cpy_f32_f16 = clCreateKernel(prog, "kernel_cpy_f32_f16", &err), err)); } else { backend_ctx->kernel_cpy_f32_f16 = nullptr; }
+        if (prog) { CL_CHECK((backend_ctx->kernel_cpy_f32_f32 = clCreateKernel(prog, "kernel_cpy_f32_f32", &err), err)); } else { backend_ctx->kernel_cpy_f32_f32 = nullptr; }
+        if (prog) { CL_CHECK((backend_ctx->kernel_cpy_i32_i32 = clCreateKernel(prog, "kernel_cpy_i32_i32", &err), err)); } else { backend_ctx->kernel_cpy_i32_i32 = nullptr; }
         GGML_LOG_CONT(".");
     }
 
@@ -1258,29 +1281,29 @@ static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx, ggml_cl_ve
         backend_ctx->program_cvt =
             build_program_from_source(backend_ctx->context, backend_ctx->device, kernel_src.c_str(), compile_opts);
 
-        CL_CHECK((backend_ctx->kernel_convert_block_q4_0_noshuffle = clCreateKernel(backend_ctx->program_cvt, "kernel_convert_block_q4_0_noshuffle", &err), err));
-        CL_CHECK((backend_ctx->kernel_restore_block_q4_0_noshuffle = clCreateKernel(backend_ctx->program_cvt, "kernel_restore_block_q4_0_noshuffle", &err), err));
-        CL_CHECK((backend_ctx->kernel_convert_block_q4_0  = clCreateKernel(backend_ctx->program_cvt, "kernel_convert_block_q4_0", &err), err));
-        CL_CHECK((backend_ctx->kernel_restore_block_q4_0  = clCreateKernel(backend_ctx->program_cvt, "kernel_restore_block_q4_0", &err), err));
-        CL_CHECK((backend_ctx->kernel_convert_block_q4_1_noshuffle = clCreateKernel(backend_ctx->program_cvt, "kernel_convert_block_q4_1_noshuffle", &err), err));
-        CL_CHECK((backend_ctx->kernel_restore_block_q4_1_noshuffle = clCreateKernel(backend_ctx->program_cvt, "kernel_restore_block_q4_1_noshuffle", &err), err));
-        CL_CHECK((backend_ctx->kernel_convert_block_q4_1  = clCreateKernel(backend_ctx->program_cvt, "kernel_convert_block_q4_1", &err), err));
-        CL_CHECK((backend_ctx->kernel_restore_block_q4_1  = clCreateKernel(backend_ctx->program_cvt, "kernel_restore_block_q4_1", &err), err));
-        CL_CHECK((backend_ctx->kernel_convert_block_mxfp4 = clCreateKernel(backend_ctx->program_cvt, "kernel_convert_block_mxfp4", &err), err));
-        CL_CHECK((backend_ctx->kernel_convert_block_mxfp4_trans = clCreateKernel(backend_ctx->program_cvt, "kernel_convert_block_mxfp4_trans", &err), err));
-        CL_CHECK((backend_ctx->kernel_restore_block_mxfp4_trans = clCreateKernel(backend_ctx->program_cvt, "kernel_restore_block_mxfp4_trans", &err), err));
-        CL_CHECK((backend_ctx->kernel_restore_block_mxfp4 = clCreateKernel(backend_ctx->program_cvt, "kernel_restore_block_mxfp4", &err), err));
-        CL_CHECK((backend_ctx->kernel_convert_block_q8_0  = clCreateKernel(backend_ctx->program_cvt, "kernel_convert_block_q8_0", &err), err));
-        CL_CHECK((backend_ctx->kernel_restore_block_q8_0  = clCreateKernel(backend_ctx->program_cvt, "kernel_restore_block_q8_0", &err), err));
-        CL_CHECK((backend_ctx->kernel_restore_block_q8_0_trans  = clCreateKernel(backend_ctx->program_cvt, "kernel_restore_block_q8_0_trans", &err), err));
-        CL_CHECK((backend_ctx->kernel_convert_block_q4_K  = clCreateKernel(backend_ctx->program_cvt, "kernel_convert_block_q4_K", &err), err));
-        CL_CHECK((backend_ctx->kernel_restore_block_q4_K  = clCreateKernel(backend_ctx->program_cvt, "kernel_restore_block_q4_K", &err), err));
-        CL_CHECK((backend_ctx->kernel_convert_block_q4_K_noshuffle = clCreateKernel(backend_ctx->program_cvt, "kernel_convert_block_q4_K_noshuffle", &err), err));
-        CL_CHECK((backend_ctx->kernel_restore_block_q4_K_noshuffle = clCreateKernel(backend_ctx->program_cvt, "kernel_restore_block_q4_K_noshuffle", &err), err));
-        CL_CHECK((backend_ctx->kernel_convert_block_q6_K  = clCreateKernel(backend_ctx->program_cvt, "kernel_convert_block_q6_K", &err), err));
-        CL_CHECK((backend_ctx->kernel_restore_block_q6_K  = clCreateKernel(backend_ctx->program_cvt, "kernel_restore_block_q6_K", &err), err));
-        CL_CHECK((backend_ctx->kernel_convert_block_q6_K_noshuffle  = clCreateKernel(backend_ctx->program_cvt, "kernel_convert_block_q6_K_noshuffle", &err), err));
-        CL_CHECK((backend_ctx->kernel_restore_block_q6_K_noshuffle  = clCreateKernel(backend_ctx->program_cvt, "kernel_restore_block_q6_K_noshuffle", &err), err));
+        if (backend_ctx->program_cvt) { CL_CHECK((backend_ctx->kernel_convert_block_q4_0_noshuffle = clCreateKernel(backend_ctx->program_cvt, "kernel_convert_block_q4_0_noshuffle", &err), err)); } else { backend_ctx->kernel_convert_block_q4_0_noshuffle = nullptr; }
+        if (backend_ctx->program_cvt) { CL_CHECK((backend_ctx->kernel_restore_block_q4_0_noshuffle = clCreateKernel(backend_ctx->program_cvt, "kernel_restore_block_q4_0_noshuffle", &err), err)); } else { backend_ctx->kernel_restore_block_q4_0_noshuffle = nullptr; }
+        if (backend_ctx->program_cvt) { CL_CHECK((backend_ctx->kernel_convert_block_q4_0 = clCreateKernel(backend_ctx->program_cvt, "kernel_convert_block_q4_0", &err), err)); } else { backend_ctx->kernel_convert_block_q4_0 = nullptr; }
+        if (backend_ctx->program_cvt) { CL_CHECK((backend_ctx->kernel_restore_block_q4_0 = clCreateKernel(backend_ctx->program_cvt, "kernel_restore_block_q4_0", &err), err)); } else { backend_ctx->kernel_restore_block_q4_0 = nullptr; }
+        if (backend_ctx->program_cvt) { CL_CHECK((backend_ctx->kernel_convert_block_q4_1_noshuffle = clCreateKernel(backend_ctx->program_cvt, "kernel_convert_block_q4_1_noshuffle", &err), err)); } else { backend_ctx->kernel_convert_block_q4_1_noshuffle = nullptr; }
+        if (backend_ctx->program_cvt) { CL_CHECK((backend_ctx->kernel_restore_block_q4_1_noshuffle = clCreateKernel(backend_ctx->program_cvt, "kernel_restore_block_q4_1_noshuffle", &err), err)); } else { backend_ctx->kernel_restore_block_q4_1_noshuffle = nullptr; }
+        if (backend_ctx->program_cvt) { CL_CHECK((backend_ctx->kernel_convert_block_q4_1 = clCreateKernel(backend_ctx->program_cvt, "kernel_convert_block_q4_1", &err), err)); } else { backend_ctx->kernel_convert_block_q4_1 = nullptr; }
+        if (backend_ctx->program_cvt) { CL_CHECK((backend_ctx->kernel_restore_block_q4_1 = clCreateKernel(backend_ctx->program_cvt, "kernel_restore_block_q4_1", &err), err)); } else { backend_ctx->kernel_restore_block_q4_1 = nullptr; }
+        if (backend_ctx->program_cvt) { CL_CHECK((backend_ctx->kernel_convert_block_mxfp4 = clCreateKernel(backend_ctx->program_cvt, "kernel_convert_block_mxfp4", &err), err)); } else { backend_ctx->kernel_convert_block_mxfp4 = nullptr; }
+        if (backend_ctx->program_cvt) { CL_CHECK((backend_ctx->kernel_convert_block_mxfp4_trans = clCreateKernel(backend_ctx->program_cvt, "kernel_convert_block_mxfp4_trans", &err), err)); } else { backend_ctx->kernel_convert_block_mxfp4_trans = nullptr; }
+        if (backend_ctx->program_cvt) { CL_CHECK((backend_ctx->kernel_restore_block_mxfp4_trans = clCreateKernel(backend_ctx->program_cvt, "kernel_restore_block_mxfp4_trans", &err), err)); } else { backend_ctx->kernel_restore_block_mxfp4_trans = nullptr; }
+        if (backend_ctx->program_cvt) { CL_CHECK((backend_ctx->kernel_restore_block_mxfp4 = clCreateKernel(backend_ctx->program_cvt, "kernel_restore_block_mxfp4", &err), err)); } else { backend_ctx->kernel_restore_block_mxfp4 = nullptr; }
+        if (backend_ctx->program_cvt) { CL_CHECK((backend_ctx->kernel_convert_block_q8_0 = clCreateKernel(backend_ctx->program_cvt, "kernel_convert_block_q8_0", &err), err)); } else { backend_ctx->kernel_convert_block_q8_0 = nullptr; }
+        if (backend_ctx->program_cvt) { CL_CHECK((backend_ctx->kernel_restore_block_q8_0 = clCreateKernel(backend_ctx->program_cvt, "kernel_restore_block_q8_0", &err), err)); } else { backend_ctx->kernel_restore_block_q8_0 = nullptr; }
+        if (backend_ctx->program_cvt) { CL_CHECK((backend_ctx->kernel_restore_block_q8_0_trans = clCreateKernel(backend_ctx->program_cvt, "kernel_restore_block_q8_0_trans", &err), err)); } else { backend_ctx->kernel_restore_block_q8_0_trans = nullptr; }
+        if (backend_ctx->program_cvt) { CL_CHECK((backend_ctx->kernel_convert_block_q4_K = clCreateKernel(backend_ctx->program_cvt, "kernel_convert_block_q4_K", &err), err)); } else { backend_ctx->kernel_convert_block_q4_K = nullptr; }
+        if (backend_ctx->program_cvt) { CL_CHECK((backend_ctx->kernel_restore_block_q4_K = clCreateKernel(backend_ctx->program_cvt, "kernel_restore_block_q4_K", &err), err)); } else { backend_ctx->kernel_restore_block_q4_K = nullptr; }
+        if (backend_ctx->program_cvt) { CL_CHECK((backend_ctx->kernel_convert_block_q4_K_noshuffle = clCreateKernel(backend_ctx->program_cvt, "kernel_convert_block_q4_K_noshuffle", &err), err)); } else { backend_ctx->kernel_convert_block_q4_K_noshuffle = nullptr; }
+        if (backend_ctx->program_cvt) { CL_CHECK((backend_ctx->kernel_restore_block_q4_K_noshuffle = clCreateKernel(backend_ctx->program_cvt, "kernel_restore_block_q4_K_noshuffle", &err), err)); } else { backend_ctx->kernel_restore_block_q4_K_noshuffle = nullptr; }
+        if (backend_ctx->program_cvt) { CL_CHECK((backend_ctx->kernel_convert_block_q6_K = clCreateKernel(backend_ctx->program_cvt, "kernel_convert_block_q6_K", &err), err)); } else { backend_ctx->kernel_convert_block_q6_K = nullptr; }
+        if (backend_ctx->program_cvt) { CL_CHECK((backend_ctx->kernel_restore_block_q6_K = clCreateKernel(backend_ctx->program_cvt, "kernel_restore_block_q6_K", &err), err)); } else { backend_ctx->kernel_restore_block_q6_K = nullptr; }
+        if (backend_ctx->program_cvt) { CL_CHECK((backend_ctx->kernel_convert_block_q6_K_noshuffle = clCreateKernel(backend_ctx->program_cvt, "kernel_convert_block_q6_K_noshuffle", &err), err)); } else { backend_ctx->kernel_convert_block_q6_K_noshuffle = nullptr; }
+        if (backend_ctx->program_cvt) { CL_CHECK((backend_ctx->kernel_restore_block_q6_K_noshuffle = clCreateKernel(backend_ctx->program_cvt, "kernel_restore_block_q6_K_noshuffle", &err), err)); } else { backend_ctx->kernel_restore_block_q6_K_noshuffle = nullptr; }
         GGML_LOG_CONT(".");
     }
 
@@ -1296,8 +1319,8 @@ static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx, ggml_cl_ve
         backend_ctx->program_diag_mask_inf =
             build_program_from_source(backend_ctx->context, backend_ctx->device, kernel_src.c_str(), compile_opts);
 
-        CL_CHECK((backend_ctx->kernel_diag_mask_inf_8 = clCreateKernel(backend_ctx->program_diag_mask_inf, "kernel_diag_mask_inf_8", &err), err));
-        CL_CHECK((backend_ctx->kernel_diag_mask_inf   = clCreateKernel(backend_ctx->program_diag_mask_inf, "kernel_diag_mask_inf", &err), err));
+        if (backend_ctx->program_diag_mask_inf) { CL_CHECK((backend_ctx->kernel_diag_mask_inf_8 = clCreateKernel(backend_ctx->program_diag_mask_inf, "kernel_diag_mask_inf_8", &err), err)); } else { backend_ctx->kernel_diag_mask_inf_8 = nullptr; }
+        if (backend_ctx->program_diag_mask_inf) { CL_CHECK((backend_ctx->kernel_diag_mask_inf = clCreateKernel(backend_ctx->program_diag_mask_inf, "kernel_diag_mask_inf", &err), err)); } else { backend_ctx->kernel_diag_mask_inf = nullptr; }
         GGML_LOG_CONT(".");
     }
 
@@ -1313,7 +1336,7 @@ static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx, ggml_cl_ve
         cl_program prog =
             build_program_from_source(backend_ctx->context, backend_ctx->device, kernel_src.c_str(), compile_opts);
 
-        CL_CHECK((backend_ctx->kernel_diag_f32 = clCreateKernel(prog, "kernel_diag_f32", &err), err));
+        if (prog) { CL_CHECK((backend_ctx->kernel_diag_f32 = clCreateKernel(prog, "kernel_diag_f32", &err), err)); } else { backend_ctx->kernel_diag_f32 = nullptr; }
         CL_CHECK(clReleaseProgram(prog));
         GGML_LOG_CONT(".");
     }
@@ -1330,12 +1353,12 @@ static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx, ggml_cl_ve
         backend_ctx->program_gelu =
             build_program_from_source(backend_ctx->context, backend_ctx->device, kernel_src.c_str(), compile_opts);
 
-        CL_CHECK((backend_ctx->kernel_gelu         = clCreateKernel(backend_ctx->program_gelu, "kernel_gelu", &err), err));
-        CL_CHECK((backend_ctx->kernel_gelu_4       = clCreateKernel(backend_ctx->program_gelu, "kernel_gelu_4", &err), err));
-        CL_CHECK((backend_ctx->kernel_gelu_erf     = clCreateKernel(backend_ctx->program_gelu, "kernel_gelu_erf", &err), err));
-        CL_CHECK((backend_ctx->kernel_gelu_erf_4   = clCreateKernel(backend_ctx->program_gelu, "kernel_gelu_erf_4", &err), err));
-        CL_CHECK((backend_ctx->kernel_gelu_quick   = clCreateKernel(backend_ctx->program_gelu, "kernel_gelu_quick", &err), err));
-        CL_CHECK((backend_ctx->kernel_gelu_quick_4 = clCreateKernel(backend_ctx->program_gelu, "kernel_gelu_quick_4", &err), err));
+        if (backend_ctx->program_gelu) { CL_CHECK((backend_ctx->kernel_gelu = clCreateKernel(backend_ctx->program_gelu, "kernel_gelu", &err), err)); } else { backend_ctx->kernel_gelu = nullptr; }
+        if (backend_ctx->program_gelu) { CL_CHECK((backend_ctx->kernel_gelu_4 = clCreateKernel(backend_ctx->program_gelu, "kernel_gelu_4", &err), err)); } else { backend_ctx->kernel_gelu_4 = nullptr; }
+        if (backend_ctx->program_gelu) { CL_CHECK((backend_ctx->kernel_gelu_erf = clCreateKernel(backend_ctx->program_gelu, "kernel_gelu_erf", &err), err)); } else { backend_ctx->kernel_gelu_erf = nullptr; }
+        if (backend_ctx->program_gelu) { CL_CHECK((backend_ctx->kernel_gelu_erf_4 = clCreateKernel(backend_ctx->program_gelu, "kernel_gelu_erf_4", &err), err)); } else { backend_ctx->kernel_gelu_erf_4 = nullptr; }
+        if (backend_ctx->program_gelu) { CL_CHECK((backend_ctx->kernel_gelu_quick = clCreateKernel(backend_ctx->program_gelu, "kernel_gelu_quick", &err), err)); } else { backend_ctx->kernel_gelu_quick = nullptr; }
+        if (backend_ctx->program_gelu) { CL_CHECK((backend_ctx->kernel_gelu_quick_4 = clCreateKernel(backend_ctx->program_gelu, "kernel_gelu_quick_4", &err), err)); } else { backend_ctx->kernel_gelu_quick_4 = nullptr; }
         GGML_LOG_CONT(".");
     }
 
@@ -1351,17 +1374,17 @@ static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx, ggml_cl_ve
         backend_ctx->program_glu =
             build_program_from_source(backend_ctx->context, backend_ctx->device, kernel_src.c_str(), compile_opts);
 
-        CL_CHECK((backend_ctx->kernel_geglu           = clCreateKernel(backend_ctx->program_glu, "kernel_geglu", &err), err));
-        CL_CHECK((backend_ctx->kernel_reglu           = clCreateKernel(backend_ctx->program_glu, "kernel_reglu", &err), err));
-        CL_CHECK((backend_ctx->kernel_swiglu          = clCreateKernel(backend_ctx->program_glu, "kernel_swiglu", &err), err));
-        CL_CHECK((backend_ctx->kernel_swiglu_oai      = clCreateKernel(backend_ctx->program_glu, "kernel_swiglu_oai", &err), err));
-        CL_CHECK((backend_ctx->kernel_geglu_erf       = clCreateKernel(backend_ctx->program_glu, "kernel_geglu_erf", &err), err));
-        CL_CHECK((backend_ctx->kernel_geglu_quick     = clCreateKernel(backend_ctx->program_glu, "kernel_geglu_quick", &err), err));
-        CL_CHECK((backend_ctx->kernel_geglu_f16       = clCreateKernel(backend_ctx->program_glu, "kernel_geglu_f16", &err), err));
-        CL_CHECK((backend_ctx->kernel_reglu_f16       = clCreateKernel(backend_ctx->program_glu, "kernel_reglu_f16", &err), err));
-        CL_CHECK((backend_ctx->kernel_swiglu_f16      = clCreateKernel(backend_ctx->program_glu, "kernel_swiglu_f16", &err), err));
-        CL_CHECK((backend_ctx->kernel_geglu_erf_f16   = clCreateKernel(backend_ctx->program_glu, "kernel_geglu_erf_f16", &err), err));
-        CL_CHECK((backend_ctx->kernel_geglu_quick_f16 = clCreateKernel(backend_ctx->program_glu, "kernel_geglu_quick_f16", &err), err));
+        if (backend_ctx->program_glu) { CL_CHECK((backend_ctx->kernel_geglu = clCreateKernel(backend_ctx->program_glu, "kernel_geglu", &err), err)); } else { backend_ctx->kernel_geglu = nullptr; }
+        if (backend_ctx->program_glu) { CL_CHECK((backend_ctx->kernel_reglu = clCreateKernel(backend_ctx->program_glu, "kernel_reglu", &err), err)); } else { backend_ctx->kernel_reglu = nullptr; }
+        if (backend_ctx->program_glu) { CL_CHECK((backend_ctx->kernel_swiglu = clCreateKernel(backend_ctx->program_glu, "kernel_swiglu", &err), err)); } else { backend_ctx->kernel_swiglu = nullptr; }
+        if (backend_ctx->program_glu) { CL_CHECK((backend_ctx->kernel_swiglu_oai = clCreateKernel(backend_ctx->program_glu, "kernel_swiglu_oai", &err), err)); } else { backend_ctx->kernel_swiglu_oai = nullptr; }
+        if (backend_ctx->program_glu) { CL_CHECK((backend_ctx->kernel_geglu_erf = clCreateKernel(backend_ctx->program_glu, "kernel_geglu_erf", &err), err)); } else { backend_ctx->kernel_geglu_erf = nullptr; }
+        if (backend_ctx->program_glu) { CL_CHECK((backend_ctx->kernel_geglu_quick = clCreateKernel(backend_ctx->program_glu, "kernel_geglu_quick", &err), err)); } else { backend_ctx->kernel_geglu_quick = nullptr; }
+        if (backend_ctx->program_glu) { CL_CHECK((backend_ctx->kernel_geglu_f16 = clCreateKernel(backend_ctx->program_glu, "kernel_geglu_f16", &err), err)); } else { backend_ctx->kernel_geglu_f16 = nullptr; }
+        if (backend_ctx->program_glu) { CL_CHECK((backend_ctx->kernel_reglu_f16 = clCreateKernel(backend_ctx->program_glu, "kernel_reglu_f16", &err), err)); } else { backend_ctx->kernel_reglu_f16 = nullptr; }
+        if (backend_ctx->program_glu) { CL_CHECK((backend_ctx->kernel_swiglu_f16 = clCreateKernel(backend_ctx->program_glu, "kernel_swiglu_f16", &err), err)); } else { backend_ctx->kernel_swiglu_f16 = nullptr; }
+        if (backend_ctx->program_glu) { CL_CHECK((backend_ctx->kernel_geglu_erf_f16 = clCreateKernel(backend_ctx->program_glu, "kernel_geglu_erf_f16", &err), err)); } else { backend_ctx->kernel_geglu_erf_f16 = nullptr; }
+        if (backend_ctx->program_glu) { CL_CHECK((backend_ctx->kernel_geglu_quick_f16 = clCreateKernel(backend_ctx->program_glu, "kernel_geglu_quick_f16", &err), err)); } else { backend_ctx->kernel_geglu_quick_f16 = nullptr; }
         GGML_LOG_CONT(".");
     }
 
@@ -1377,9 +1400,9 @@ static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx, ggml_cl_ve
         backend_ctx->program_get_rows =
             build_program_from_source(backend_ctx->context, backend_ctx->device, kernel_src.c_str(), compile_opts);
 
-        CL_CHECK((backend_ctx->kernel_get_rows_f32  = clCreateKernel(backend_ctx->program_get_rows, "kernel_get_rows_f32", &err), err));
-        CL_CHECK((backend_ctx->kernel_get_rows_f16  = clCreateKernel(backend_ctx->program_get_rows, "kernel_get_rows_f16", &err), err));
-        CL_CHECK((backend_ctx->kernel_get_rows_q4_0 = clCreateKernel(backend_ctx->program_get_rows, "kernel_get_rows_q4_0", &err), err));
+        if (backend_ctx->program_get_rows) { CL_CHECK((backend_ctx->kernel_get_rows_f32 = clCreateKernel(backend_ctx->program_get_rows, "kernel_get_rows_f32", &err), err)); } else { backend_ctx->kernel_get_rows_f32 = nullptr; }
+        if (backend_ctx->program_get_rows) { CL_CHECK((backend_ctx->kernel_get_rows_f16 = clCreateKernel(backend_ctx->program_get_rows, "kernel_get_rows_f16", &err), err)); } else { backend_ctx->kernel_get_rows_f16 = nullptr; }
+        if (backend_ctx->program_get_rows) { CL_CHECK((backend_ctx->kernel_get_rows_q4_0 = clCreateKernel(backend_ctx->program_get_rows, "kernel_get_rows_q4_0", &err), err)); } else { backend_ctx->kernel_get_rows_q4_0 = nullptr; }
         GGML_LOG_CONT(".");
     }
 
@@ -1395,7 +1418,7 @@ static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx, ggml_cl_ve
         cl_program prog =
             build_program_from_source(backend_ctx->context, backend_ctx->device, kernel_src.c_str(), compile_opts);
 
-        CL_CHECK((backend_ctx->kernel_solve_tri_f32 = clCreateKernel(prog, "kernel_solve_tri_f32", &err), err));
+        if (prog) { CL_CHECK((backend_ctx->kernel_solve_tri_f32 = clCreateKernel(prog, "kernel_solve_tri_f32", &err), err)); } else { backend_ctx->kernel_solve_tri_f32 = nullptr; }
         GGML_LOG_CONT(".");
         CL_CHECK(clReleaseProgram(prog));
     }
@@ -1412,7 +1435,7 @@ static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx, ggml_cl_ve
         backend_ctx->program_im2col_f32 =
             build_program_from_source(backend_ctx->context, backend_ctx->device, kernel_src.c_str(), compile_opts);
 
-        CL_CHECK((backend_ctx->kernel_im2col_f32 = clCreateKernel(backend_ctx->program_im2col_f32, "kernel_im2col_f32", &err), err));
+        if (backend_ctx->program_im2col_f32) { CL_CHECK((backend_ctx->kernel_im2col_f32 = clCreateKernel(backend_ctx->program_im2col_f32, "kernel_im2col_f32", &err), err)); } else { backend_ctx->kernel_im2col_f32 = nullptr; }
         GGML_LOG_CONT(".");
     }
 
@@ -1428,7 +1451,7 @@ static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx, ggml_cl_ve
         backend_ctx->program_im2col_f16 =
             build_program_from_source(backend_ctx->context, backend_ctx->device, kernel_src.c_str(), compile_opts);
 
-        CL_CHECK((backend_ctx->kernel_im2col_f16 = clCreateKernel(backend_ctx->program_im2col_f16, "kernel_im2col_f16", &err), err));
+        if (backend_ctx->program_im2col_f16) { CL_CHECK((backend_ctx->kernel_im2col_f16 = clCreateKernel(backend_ctx->program_im2col_f16, "kernel_im2col_f16", &err), err)); } else { backend_ctx->kernel_im2col_f16 = nullptr; }
         GGML_LOG_CONT(".");
     }
 
@@ -1444,7 +1467,7 @@ static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx, ggml_cl_ve
         backend_ctx->program_mul_mv_q4_0_f32 =
             build_program_from_source(backend_ctx->context, backend_ctx->device, kernel_src.c_str(), compile_opts);
 
-        CL_CHECK((backend_ctx->kernel_mul_mat_q4_0_f32 = clCreateKernel(backend_ctx->program_mul_mv_q4_0_f32, "kernel_mul_mat_q4_0_f32", &err), err));
+        if (backend_ctx->program_mul_mv_q4_0_f32) { CL_CHECK((backend_ctx->kernel_mul_mat_q4_0_f32 = clCreateKernel(backend_ctx->program_mul_mv_q4_0_f32, "kernel_mul_mat_q4_0_f32", &err), err)); } else { backend_ctx->kernel_mul_mat_q4_0_f32 = nullptr; }
         GGML_LOG_CONT(".");
     }
 
@@ -1460,7 +1483,7 @@ static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx, ggml_cl_ve
         backend_ctx->program_mul_mv_q4_0_f32_v =
             build_program_from_source(backend_ctx->context, backend_ctx->device, kernel_src.c_str(), compile_opts);
 
-        CL_CHECK((backend_ctx->kernel_mul_mat_q4_0_f32_v = clCreateKernel(backend_ctx->program_mul_mv_q4_0_f32_v, "kernel_mul_mat_q4_0_f32_v", &err), err));
+        if (backend_ctx->program_mul_mv_q4_0_f32_v) { CL_CHECK((backend_ctx->kernel_mul_mat_q4_0_f32_v = clCreateKernel(backend_ctx->program_mul_mv_q4_0_f32_v, "kernel_mul_mat_q4_0_f32_v", &err), err)); } else { backend_ctx->kernel_mul_mat_q4_0_f32_v = nullptr; }
         GGML_LOG_CONT(".");
     }
 
@@ -1476,7 +1499,7 @@ static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx, ggml_cl_ve
         backend_ctx->program_mul_mv_q4_0_f32_8x_flat =
             build_program_from_source(backend_ctx->context, backend_ctx->device, kernel_src.c_str(), compile_opts);
 
-        CL_CHECK((backend_ctx->kernel_mul_mat_q4_0_f32_8x_flat = clCreateKernel(backend_ctx->program_mul_mv_q4_0_f32_8x_flat, "kernel_mul_mat_q4_0_f32_8x_flat", &err), err));
+        if (backend_ctx->program_mul_mv_q4_0_f32_8x_flat) { CL_CHECK((backend_ctx->kernel_mul_mat_q4_0_f32_8x_flat = clCreateKernel(backend_ctx->program_mul_mv_q4_0_f32_8x_flat, "kernel_mul_mat_q4_0_f32_8x_flat", &err), err)); } else { backend_ctx->kernel_mul_mat_q4_0_f32_8x_flat = nullptr; }
         GGML_LOG_CONT(".");
     }
 
@@ -1496,7 +1519,7 @@ static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx, ggml_cl_ve
         backend_ctx->program_mul_mv_q4_0_f32_1d_8x_flat =
             build_program_from_source(backend_ctx->context, backend_ctx->device, kernel_src.c_str(), compile_opts);
 
-        CL_CHECK((backend_ctx->kernel_mul_mat_q4_0_f32_1d_8x_flat = clCreateKernel(backend_ctx->program_mul_mv_q4_0_f32_1d_8x_flat, "kernel_mul_mat_q4_0_f32_1d_8x_flat", &err), err));
+        if (backend_ctx->program_mul_mv_q4_0_f32_1d_8x_flat) { CL_CHECK((backend_ctx->kernel_mul_mat_q4_0_f32_1d_8x_flat = clCreateKernel(backend_ctx->program_mul_mv_q4_0_f32_1d_8x_flat, "kernel_mul_mat_q4_0_f32_1d_8x_flat", &err), err)); } else { backend_ctx->kernel_mul_mat_q4_0_f32_1d_8x_flat = nullptr; }
         GGML_LOG_CONT(".");
     }
 
@@ -1516,7 +1539,7 @@ static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx, ggml_cl_ve
         backend_ctx->program_mul_mv_q4_0_f32_1d_16x_flat =
             build_program_from_source(backend_ctx->context, backend_ctx->device, kernel_src.c_str(), compile_opts);
 
-        CL_CHECK((backend_ctx->kernel_mul_mat_q4_0_f32_1d_16x_flat = clCreateKernel(backend_ctx->program_mul_mv_q4_0_f32_1d_16x_flat, "kernel_mul_mat_q4_0_f32_1d_16x_flat", &err), err));
+        if (backend_ctx->program_mul_mv_q4_0_f32_1d_16x_flat) { CL_CHECK((backend_ctx->kernel_mul_mat_q4_0_f32_1d_16x_flat = clCreateKernel(backend_ctx->program_mul_mv_q4_0_f32_1d_16x_flat, "kernel_mul_mat_q4_0_f32_1d_16x_flat", &err), err)); } else { backend_ctx->kernel_mul_mat_q4_0_f32_1d_16x_flat = nullptr; }
         GGML_LOG_CONT(".");
     }
 
@@ -1532,7 +1555,7 @@ static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx, ggml_cl_ve
         cl_program prog =
             build_program_from_source(backend_ctx->context, backend_ctx->device, kernel_src.c_str(), compile_opts);
 
-        CL_CHECK((backend_ctx->kernel_mul_mv_q4_1_f32 = clCreateKernel(prog, "kernel_mul_mv_q4_1_f32", &err), err));
+        if (prog) { CL_CHECK((backend_ctx->kernel_mul_mv_q4_1_f32 = clCreateKernel(prog, "kernel_mul_mv_q4_1_f32", &err), err)); } else { backend_ctx->kernel_mul_mv_q4_1_f32 = nullptr; }
         CL_CHECK(clReleaseProgram(prog));
         GGML_LOG_CONT(".");
     }
@@ -1549,7 +1572,7 @@ static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx, ggml_cl_ve
         cl_program prog =
             build_program_from_source(backend_ctx->context, backend_ctx->device, kernel_src.c_str(), compile_opts);
 
-        CL_CHECK((backend_ctx->kernel_mul_mv_q4_1_f32_flat = clCreateKernel(prog, "kernel_mul_mv_q4_1_f32_flat", &err), err));
+        if (prog) { CL_CHECK((backend_ctx->kernel_mul_mv_q4_1_f32_flat = clCreateKernel(prog, "kernel_mul_mv_q4_1_f32_flat", &err), err)); } else { backend_ctx->kernel_mul_mv_q4_1_f32_flat = nullptr; }
         CL_CHECK(clReleaseProgram(prog));
         GGML_LOG_CONT(".");
     }
@@ -1566,7 +1589,7 @@ static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx, ggml_cl_ve
         cl_program prog =
             build_program_from_source(backend_ctx->context, backend_ctx->device, kernel_src.c_str(), compile_opts);
 
-        CL_CHECK((backend_ctx->kernel_mul_mv_q4_K_f32 = clCreateKernel(prog, "kernel_mul_mv_q4_K_f32", &err), err));
+        if (prog) { CL_CHECK((backend_ctx->kernel_mul_mv_q4_K_f32 = clCreateKernel(prog, "kernel_mul_mv_q4_K_f32", &err), err)); } else { backend_ctx->kernel_mul_mv_q4_K_f32 = nullptr; }
         CL_CHECK(clReleaseProgram(prog));
         GGML_LOG_CONT(".");
     }
@@ -1583,7 +1606,7 @@ static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx, ggml_cl_ve
         cl_program prog =
             build_program_from_source(backend_ctx->context, backend_ctx->device, kernel_src.c_str(), compile_opts);
 
-        CL_CHECK((backend_ctx->kernel_mul_mv_q4_K_f32_flat = clCreateKernel(prog, "kernel_mul_mv_q4_K_f32_flat", &err), err));
+        if (prog) { CL_CHECK((backend_ctx->kernel_mul_mv_q4_K_f32_flat = clCreateKernel(prog, "kernel_mul_mv_q4_K_f32_flat", &err), err)); } else { backend_ctx->kernel_mul_mv_q4_K_f32_flat = nullptr; }
         CL_CHECK(clReleaseProgram(prog));
         GGML_LOG_CONT(".");
     }
@@ -1600,7 +1623,7 @@ static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx, ggml_cl_ve
         backend_ctx->program_mul_mv_q6_K =
             build_program_from_source(backend_ctx->context, backend_ctx->device, kernel_src.c_str(), compile_opts);
 
-        CL_CHECK((backend_ctx->kernel_mul_mv_q6_K_f32 = clCreateKernel(backend_ctx->program_mul_mv_q6_K, "kernel_mul_mv_q6_K_f32", &err), err));
+        if (backend_ctx->program_mul_mv_q6_K) { CL_CHECK((backend_ctx->kernel_mul_mv_q6_K_f32 = clCreateKernel(backend_ctx->program_mul_mv_q6_K, "kernel_mul_mv_q6_K_f32", &err), err)); } else { backend_ctx->kernel_mul_mv_q6_K_f32 = nullptr; }
         GGML_LOG_CONT(".");
     }
 
@@ -1616,7 +1639,7 @@ static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx, ggml_cl_ve
         cl_program prog =
             build_program_from_source(backend_ctx->context, backend_ctx->device, kernel_src.c_str(), compile_opts);
 
-        CL_CHECK((backend_ctx->kernel_mul_mv_q6_K_f32_flat = clCreateKernel(prog, "kernel_mul_mv_q6_K_f32_flat", &err), err));
+        if (prog) { CL_CHECK((backend_ctx->kernel_mul_mv_q6_K_f32_flat = clCreateKernel(prog, "kernel_mul_mv_q6_K_f32_flat", &err), err)); } else { backend_ctx->kernel_mul_mv_q6_K_f32_flat = nullptr; }
         CL_CHECK(clReleaseProgram(prog));
         GGML_LOG_CONT(".");
     }
@@ -1633,7 +1656,7 @@ static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx, ggml_cl_ve
         backend_ctx->program_mul_mv_q8_0_f32 =
             build_program_from_source(backend_ctx->context, backend_ctx->device, kernel_src.c_str(), compile_opts);
 
-        CL_CHECK((backend_ctx->kernel_mul_mv_q8_0_f32 = clCreateKernel(backend_ctx->program_mul_mv_q8_0_f32, "kernel_mul_mv_q8_0_f32", &err), err));
+        if (backend_ctx->program_mul_mv_q8_0_f32) { CL_CHECK((backend_ctx->kernel_mul_mv_q8_0_f32 = clCreateKernel(backend_ctx->program_mul_mv_q8_0_f32, "kernel_mul_mv_q8_0_f32", &err), err)); } else { backend_ctx->kernel_mul_mv_q8_0_f32 = nullptr; }
         GGML_LOG_CONT(".");
     }
 
@@ -1649,7 +1672,7 @@ static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx, ggml_cl_ve
         backend_ctx->program_mul_mv_q8_0_f32_flat =
             build_program_from_source(backend_ctx->context, backend_ctx->device, kernel_src.c_str(), compile_opts);
 
-        CL_CHECK((backend_ctx->kernel_mul_mv_q8_0_f32_flat = clCreateKernel(backend_ctx->program_mul_mv_q8_0_f32_flat, "kernel_mul_mv_q8_0_f32_flat", &err), err));
+        if (backend_ctx->program_mul_mv_q8_0_f32_flat) { CL_CHECK((backend_ctx->kernel_mul_mv_q8_0_f32_flat = clCreateKernel(backend_ctx->program_mul_mv_q8_0_f32_flat, "kernel_mul_mv_q8_0_f32_flat", &err), err)); } else { backend_ctx->kernel_mul_mv_q8_0_f32_flat = nullptr; }
         GGML_LOG_CONT(".");
     }
 
@@ -1665,7 +1688,7 @@ static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx, ggml_cl_ve
         backend_ctx->program_mul_mv_mxfp4_f32 =
             build_program_from_source(backend_ctx->context, backend_ctx->device, kernel_src.c_str(), compile_opts);
 
-        CL_CHECK((backend_ctx->kernel_mul_mv_mxfp4_f32 = clCreateKernel(backend_ctx->program_mul_mv_mxfp4_f32, "kernel_mul_mv_mxfp4_f32", &err), err));
+        if (backend_ctx->program_mul_mv_mxfp4_f32) { CL_CHECK((backend_ctx->kernel_mul_mv_mxfp4_f32 = clCreateKernel(backend_ctx->program_mul_mv_mxfp4_f32, "kernel_mul_mv_mxfp4_f32", &err), err)); } else { backend_ctx->kernel_mul_mv_mxfp4_f32 = nullptr; }
         GGML_LOG_CONT(".");
     }
 
@@ -1681,7 +1704,7 @@ static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx, ggml_cl_ve
         backend_ctx->program_mul_mv_mxfp4_f32_flat =
             build_program_from_source(backend_ctx->context, backend_ctx->device, kernel_src.c_str(), compile_opts);
 
-        CL_CHECK((backend_ctx->kernel_mul_mv_mxfp4_f32_flat = clCreateKernel(backend_ctx->program_mul_mv_mxfp4_f32_flat, "kernel_mul_mv_mxfp4_f32_flat", &err), err));
+        if (backend_ctx->program_mul_mv_mxfp4_f32_flat) { CL_CHECK((backend_ctx->kernel_mul_mv_mxfp4_f32_flat = clCreateKernel(backend_ctx->program_mul_mv_mxfp4_f32_flat, "kernel_mul_mv_mxfp4_f32_flat", &err), err)); } else { backend_ctx->kernel_mul_mv_mxfp4_f32_flat = nullptr; }
         GGML_LOG_CONT(".");
     }
 
@@ -1697,7 +1720,7 @@ static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx, ggml_cl_ve
         backend_ctx->program_mul_mv_f16_f16 =
             build_program_from_source(backend_ctx->context, backend_ctx->device, kernel_src.c_str(), compile_opts);
 
-        CL_CHECK((backend_ctx->kernel_mul_mat_f16_f16 = clCreateKernel(backend_ctx->program_mul_mv_f16_f16, "kernel_mul_mat_f16_f16", &err), err));
+        if (backend_ctx->program_mul_mv_f16_f16) { CL_CHECK((backend_ctx->kernel_mul_mat_f16_f16 = clCreateKernel(backend_ctx->program_mul_mv_f16_f16, "kernel_mul_mat_f16_f16", &err), err)); } else { backend_ctx->kernel_mul_mat_f16_f16 = nullptr; }
         GGML_LOG_CONT(".");
     }
 
@@ -1713,7 +1736,7 @@ static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx, ggml_cl_ve
         backend_ctx->program_mul_mv_f16_f32_1row =
             build_program_from_source(backend_ctx->context, backend_ctx->device, kernel_src.c_str(), compile_opts);
 
-        CL_CHECK((backend_ctx->kernel_mul_mat_f16_f32_1row = clCreateKernel(backend_ctx->program_mul_mv_f16_f32_1row, "kernel_mul_mat_f16_f32_1row", &err), err));
+        if (backend_ctx->program_mul_mv_f16_f32_1row) { CL_CHECK((backend_ctx->kernel_mul_mat_f16_f32_1row = clCreateKernel(backend_ctx->program_mul_mv_f16_f32_1row, "kernel_mul_mat_f16_f32_1row", &err), err)); } else { backend_ctx->kernel_mul_mat_f16_f32_1row = nullptr; }
         GGML_LOG_CONT(".");
     }
 
@@ -1729,7 +1752,7 @@ static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx, ggml_cl_ve
         backend_ctx->program_mul_mv_f16_f32_l4 =
             build_program_from_source(backend_ctx->context, backend_ctx->device, kernel_src.c_str(), compile_opts);
 
-        CL_CHECK((backend_ctx->kernel_mul_mat_f16_f32_l4   = clCreateKernel(backend_ctx->program_mul_mv_f16_f32_l4, "kernel_mul_mat_f16_f32_l4", &err), err));
+        if (backend_ctx->program_mul_mv_f16_f32_l4) { CL_CHECK((backend_ctx->kernel_mul_mat_f16_f32_l4 = clCreateKernel(backend_ctx->program_mul_mv_f16_f32_l4, "kernel_mul_mat_f16_f32_l4", &err), err)); } else { backend_ctx->kernel_mul_mat_f16_f32_l4 = nullptr; }
         GGML_LOG_CONT(".");
     }
 
@@ -1745,7 +1768,7 @@ static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx, ggml_cl_ve
         backend_ctx->program_mul_mv_f16_f32 =
             build_program_from_source(backend_ctx->context, backend_ctx->device, kernel_src.c_str(), compile_opts);
 
-        CL_CHECK((backend_ctx->kernel_mul_mat_f16_f32 = clCreateKernel(backend_ctx->program_mul_mv_f16_f32, "kernel_mul_mat_f16_f32", &err), err));
+        if (backend_ctx->program_mul_mv_f16_f32) { CL_CHECK((backend_ctx->kernel_mul_mat_f16_f32 = clCreateKernel(backend_ctx->program_mul_mv_f16_f32, "kernel_mul_mat_f16_f32", &err), err)); } else { backend_ctx->kernel_mul_mat_f16_f32 = nullptr; }
         GGML_LOG_CONT(".");
     }
 
@@ -1761,7 +1784,7 @@ static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx, ggml_cl_ve
         backend_ctx->program_mul_mv_f32_f32 =
             build_program_from_source(backend_ctx->context, backend_ctx->device, kernel_src.c_str(), compile_opts);
 
-        CL_CHECK((backend_ctx->kernel_mul_mat_f32_f32 = clCreateKernel(backend_ctx->program_mul_mv_f32_f32, "kernel_mul_mat_f32_f32", &err), err));
+        if (backend_ctx->program_mul_mv_f32_f32) { CL_CHECK((backend_ctx->kernel_mul_mat_f32_f32 = clCreateKernel(backend_ctx->program_mul_mv_f32_f32, "kernel_mul_mat_f32_f32", &err), err)); } else { backend_ctx->kernel_mul_mat_f32_f32 = nullptr; }
         GGML_LOG_CONT(".");
     }
 
@@ -1777,7 +1800,7 @@ static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx, ggml_cl_ve
         backend_ctx->program_mul_mat_f16_f32_tiled =
             build_program_from_source(backend_ctx->context, backend_ctx->device, kernel_src.c_str(), compile_opts);
 
-        CL_CHECK((backend_ctx->kernel_mul_mat_f16_f32_tiled = clCreateKernel(backend_ctx->program_mul_mat_f16_f32_tiled, "mul_mat_f16_f32", &err), err));
+        if (backend_ctx->program_mul_mat_f16_f32_tiled) { CL_CHECK((backend_ctx->kernel_mul_mat_f16_f32_tiled = clCreateKernel(backend_ctx->program_mul_mat_f16_f32_tiled, "mul_mat_f16_f32", &err), err)); } else { backend_ctx->kernel_mul_mat_f16_f32_tiled = nullptr; }
         GGML_LOG_CONT(".");
     }
 
@@ -1793,7 +1816,7 @@ static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx, ggml_cl_ve
         backend_ctx->program_mul_mm_f32_f32_l4_lm =
             build_program_from_source(backend_ctx->context, backend_ctx->device, kernel_src.c_str(), compile_opts);
 
-        CL_CHECK((backend_ctx->kernel_mul_mm_f32_f32_l4_lm = clCreateKernel(backend_ctx->program_mul_mm_f32_f32_l4_lm, "kernel_mul_mm_f32_f32_l4_lm", &err), err));
+        if (backend_ctx->program_mul_mm_f32_f32_l4_lm) { CL_CHECK((backend_ctx->kernel_mul_mm_f32_f32_l4_lm = clCreateKernel(backend_ctx->program_mul_mm_f32_f32_l4_lm, "kernel_mul_mm_f32_f32_l4_lm", &err), err)); } else { backend_ctx->kernel_mul_mm_f32_f32_l4_lm = nullptr; }
         GGML_LOG_CONT(".");
     }
 
@@ -1809,7 +1832,7 @@ static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx, ggml_cl_ve
         backend_ctx->program_mul_mm_f16_f32_l4_lm =
             build_program_from_source(backend_ctx->context, backend_ctx->device, kernel_src.c_str(), compile_opts);
 
-        CL_CHECK((backend_ctx->kernel_mul_mm_f16_f32_l4_lm = clCreateKernel(backend_ctx->program_mul_mm_f16_f32_l4_lm, "kernel_mul_mm_f16_f32_l4_lm", &err), err));
+        if (backend_ctx->program_mul_mm_f16_f32_l4_lm) { CL_CHECK((backend_ctx->kernel_mul_mm_f16_f32_l4_lm = clCreateKernel(backend_ctx->program_mul_mm_f16_f32_l4_lm, "kernel_mul_mm_f16_f32_l4_lm", &err), err)); } else { backend_ctx->kernel_mul_mm_f16_f32_l4_lm = nullptr; }
         GGML_LOG_CONT(".");
     }
 
@@ -1825,7 +1848,7 @@ static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx, ggml_cl_ve
         cl_program prog =
             build_program_from_source(backend_ctx->context, backend_ctx->device, kernel_src.c_str(), compile_opts);
 
-        CL_CHECK((backend_ctx->kernel_mul_mm_q4_0_f32_l4_lm = clCreateKernel(prog, "kernel_mul_mm_q4_0_f32_l4_lm", &err), err));
+        if (prog) { CL_CHECK((backend_ctx->kernel_mul_mm_q4_0_f32_l4_lm = clCreateKernel(prog, "kernel_mul_mm_q4_0_f32_l4_lm", &err), err)); } else { backend_ctx->kernel_mul_mm_q4_0_f32_l4_lm = nullptr; }
         GGML_LOG_CONT(".");
     }
 
@@ -1841,7 +1864,7 @@ static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx, ggml_cl_ve
         cl_program prog =
             build_program_from_source(backend_ctx->context, backend_ctx->device, kernel_src.c_str(), compile_opts);
 
-        CL_CHECK((backend_ctx->kernel_mul_mm_q4_1_f32_l4_lm = clCreateKernel(prog, "kernel_mul_mm_q4_1_f32_l4_lm", &err), err));
+        if (prog) { CL_CHECK((backend_ctx->kernel_mul_mm_q4_1_f32_l4_lm = clCreateKernel(prog, "kernel_mul_mm_q4_1_f32_l4_lm", &err), err)); } else { backend_ctx->kernel_mul_mm_q4_1_f32_l4_lm = nullptr; }
         GGML_LOG_CONT(".");
     }
 
@@ -1857,7 +1880,7 @@ static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx, ggml_cl_ve
         backend_ctx->program_mul_mm_q8_0_f32_l4_lm =
             build_program_from_source(backend_ctx->context, backend_ctx->device, kernel_src.c_str(), compile_opts);
 
-        CL_CHECK((backend_ctx->kernel_mul_mm_q8_0_f32_l4_lm = clCreateKernel(backend_ctx->program_mul_mm_q8_0_f32_l4_lm, "kernel_mul_mm_q8_0_f32_l4_lm", &err), err));
+        if (backend_ctx->program_mul_mm_q8_0_f32_l4_lm) { CL_CHECK((backend_ctx->kernel_mul_mm_q8_0_f32_l4_lm = clCreateKernel(backend_ctx->program_mul_mm_q8_0_f32_l4_lm, "kernel_mul_mm_q8_0_f32_l4_lm", &err), err)); } else { backend_ctx->kernel_mul_mm_q8_0_f32_l4_lm = nullptr; }
         GGML_LOG_CONT(".");
     }
 
@@ -1873,7 +1896,7 @@ static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx, ggml_cl_ve
         cl_program prog =
             build_program_from_source(backend_ctx->context, backend_ctx->device, kernel_src.c_str(), compile_opts);
 
-        CL_CHECK((backend_ctx->kernel_mul_mm_q4_k_f32_l4_lm = clCreateKernel(prog, "kernel_mul_mm_q4_k_f32_l4_lm", &err), err));
+        if (prog) { CL_CHECK((backend_ctx->kernel_mul_mm_q4_k_f32_l4_lm = clCreateKernel(prog, "kernel_mul_mm_q4_k_f32_l4_lm", &err), err)); } else { backend_ctx->kernel_mul_mm_q4_k_f32_l4_lm = nullptr; }
         CL_CHECK(clReleaseProgram(prog));
         GGML_LOG_CONT(".");
     }
@@ -1890,7 +1913,7 @@ static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx, ggml_cl_ve
         cl_program prog =
             build_program_from_source(backend_ctx->context, backend_ctx->device, kernel_src.c_str(), compile_opts);
 
-        CL_CHECK((backend_ctx->kernel_mul_mm_q6_k_f32_l4_lm = clCreateKernel(prog, "kernel_mul_mm_q6_k_f32_l4_lm", &err), err));
+        if (prog) { CL_CHECK((backend_ctx->kernel_mul_mm_q6_k_f32_l4_lm = clCreateKernel(prog, "kernel_mul_mm_q6_k_f32_l4_lm", &err), err)); } else { backend_ctx->kernel_mul_mm_q6_k_f32_l4_lm = nullptr; }
         CL_CHECK(clReleaseProgram(prog));
         GGML_LOG_CONT(".");
     }
@@ -1909,8 +1932,8 @@ static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx, ggml_cl_ve
         backend_ctx->program_mul_mm_f16_f32_kq =
             build_program_from_source(backend_ctx->context, backend_ctx->device, kernel_src.c_str(), compile_opts);
 
-        CL_CHECK((backend_ctx->kernel_mul_mm_f16_f32_kqv = clCreateKernel(backend_ctx->program_mul_mm_f16_f32_kqv, "mul_mm_f16_f32_kqv", &err), err));
-        CL_CHECK((backend_ctx->kernel_mul_mm_f16_f32_kq = clCreateKernel(backend_ctx->program_mul_mm_f16_f32_kq, "mul_mm_f16_f32_kq", &err), err));
+        if (backend_ctx->program_mul_mm_f16_f32_kqv) { CL_CHECK((backend_ctx->kernel_mul_mm_f16_f32_kqv = clCreateKernel(backend_ctx->program_mul_mm_f16_f32_kqv, "mul_mm_f16_f32_kqv", &err), err)); } else { backend_ctx->kernel_mul_mm_f16_f32_kqv = nullptr; }
+        if (backend_ctx->program_mul_mm_f16_f32_kq) { CL_CHECK((backend_ctx->kernel_mul_mm_f16_f32_kq = clCreateKernel(backend_ctx->program_mul_mm_f16_f32_kq, "mul_mm_f16_f32_kq", &err), err)); } else { backend_ctx->kernel_mul_mm_f16_f32_kq = nullptr; }
         GGML_LOG_CONT(".");
     }
 
@@ -1926,10 +1949,10 @@ static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx, ggml_cl_ve
         backend_ctx->program_mul =
             build_program_from_source(backend_ctx->context, backend_ctx->device, kernel_src.c_str(), compile_opts);
 
-        CL_CHECK((backend_ctx->kernel_mul         = clCreateKernel(backend_ctx->program_mul, "kernel_mul", &err), err));
-        CL_CHECK((backend_ctx->kernel_mul_row     = clCreateKernel(backend_ctx->program_mul, "kernel_mul_row", &err), err));
-        CL_CHECK((backend_ctx->kernel_mul_f16     = clCreateKernel(backend_ctx->program_mul, "kernel_mul_f16", &err), err));
-        CL_CHECK((backend_ctx->kernel_mul_row_f16 = clCreateKernel(backend_ctx->program_mul, "kernel_mul_row_f16", &err), err));
+        if (backend_ctx->program_mul) { CL_CHECK((backend_ctx->kernel_mul = clCreateKernel(backend_ctx->program_mul, "kernel_mul", &err), err)); } else { backend_ctx->kernel_mul = nullptr; }
+        if (backend_ctx->program_mul) { CL_CHECK((backend_ctx->kernel_mul_row = clCreateKernel(backend_ctx->program_mul, "kernel_mul_row", &err), err)); } else { backend_ctx->kernel_mul_row = nullptr; }
+        if (backend_ctx->program_mul) { CL_CHECK((backend_ctx->kernel_mul_f16 = clCreateKernel(backend_ctx->program_mul, "kernel_mul_f16", &err), err)); } else { backend_ctx->kernel_mul_f16 = nullptr; }
+        if (backend_ctx->program_mul) { CL_CHECK((backend_ctx->kernel_mul_row_f16 = clCreateKernel(backend_ctx->program_mul, "kernel_mul_row_f16", &err), err)); } else { backend_ctx->kernel_mul_row_f16 = nullptr; }
         GGML_LOG_CONT(".");
     }
 
@@ -1945,8 +1968,8 @@ static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx, ggml_cl_ve
         backend_ctx->program_norm =
             build_program_from_source(backend_ctx->context, backend_ctx->device, kernel_src.c_str(), compile_opts);
 
-        CL_CHECK((backend_ctx->kernel_norm         = clCreateKernel(backend_ctx->program_norm, "kernel_norm", &err), err));
-        CL_CHECK((backend_ctx->kernel_norm_mul_add = clCreateKernel(backend_ctx->program_norm, "kernel_norm_mul_add", &err), err));
+        if (backend_ctx->program_norm) { CL_CHECK((backend_ctx->kernel_norm = clCreateKernel(backend_ctx->program_norm, "kernel_norm", &err), err)); } else { backend_ctx->kernel_norm = nullptr; }
+        if (backend_ctx->program_norm) { CL_CHECK((backend_ctx->kernel_norm_mul_add = clCreateKernel(backend_ctx->program_norm, "kernel_norm_mul_add", &err), err)); } else { backend_ctx->kernel_norm_mul_add = nullptr; }
         GGML_LOG_CONT(".");
     }
 
@@ -1962,7 +1985,7 @@ static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx, ggml_cl_ve
         backend_ctx->program_relu =
             build_program_from_source(backend_ctx->context, backend_ctx->device, kernel_src.c_str(), compile_opts);
 
-        CL_CHECK((backend_ctx->kernel_relu = clCreateKernel(backend_ctx->program_relu, "kernel_relu", &err), err));
+        if (backend_ctx->program_relu) { CL_CHECK((backend_ctx->kernel_relu = clCreateKernel(backend_ctx->program_relu, "kernel_relu", &err), err)); } else { backend_ctx->kernel_relu = nullptr; }
         GGML_LOG_CONT(".");
     }
 
@@ -1978,8 +2001,8 @@ static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx, ggml_cl_ve
         backend_ctx->program_rms_norm =
             build_program_from_source(backend_ctx->context, backend_ctx->device, kernel_src.c_str(), compile_opts);
 
-        CL_CHECK((backend_ctx->kernel_rms_norm     = clCreateKernel(backend_ctx->program_rms_norm, "kernel_rms_norm", &err), err));
-        CL_CHECK((backend_ctx->kernel_rms_norm_mul = clCreateKernel(backend_ctx->program_rms_norm, "kernel_rms_norm_mul", &err), err));
+        if (backend_ctx->program_rms_norm) { CL_CHECK((backend_ctx->kernel_rms_norm = clCreateKernel(backend_ctx->program_rms_norm, "kernel_rms_norm", &err), err)); } else { backend_ctx->kernel_rms_norm = nullptr; }
+        if (backend_ctx->program_rms_norm) { CL_CHECK((backend_ctx->kernel_rms_norm_mul = clCreateKernel(backend_ctx->program_rms_norm, "kernel_rms_norm_mul", &err), err)); } else { backend_ctx->kernel_rms_norm_mul = nullptr; }
         GGML_LOG_CONT(".");
     }
 
@@ -1995,7 +2018,7 @@ static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx, ggml_cl_ve
         cl_program prog =
             build_program_from_source(backend_ctx->context, backend_ctx->device, kernel_src.c_str(), compile_opts);
 
-        CL_CHECK((backend_ctx->kernel_l2_norm_f32     = clCreateKernel(prog, "kernel_l2_norm_f32", &err), err));
+        if (prog) { CL_CHECK((backend_ctx->kernel_l2_norm_f32 = clCreateKernel(prog, "kernel_l2_norm_f32", &err), err)); } else { backend_ctx->kernel_l2_norm_f32 = nullptr; }
         CL_CHECK(clReleaseProgram(prog));
         GGML_LOG_CONT(".");
     }
@@ -2012,14 +2035,14 @@ static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx, ggml_cl_ve
         backend_ctx->program_rope =
             build_program_from_source(backend_ctx->context, backend_ctx->device, kernel_src.c_str(), compile_opts);
 
-        CL_CHECK((backend_ctx->kernel_rope_norm_f32   = clCreateKernel(backend_ctx->program_rope, "kernel_rope_norm_f32", &err), err));
-        CL_CHECK((backend_ctx->kernel_rope_norm_f16   = clCreateKernel(backend_ctx->program_rope, "kernel_rope_norm_f16", &err), err));
-        CL_CHECK((backend_ctx->kernel_rope_neox_f32   = clCreateKernel(backend_ctx->program_rope, "kernel_rope_neox_f32", &err), err));
-        CL_CHECK((backend_ctx->kernel_rope_neox_f16   = clCreateKernel(backend_ctx->program_rope, "kernel_rope_neox_f16", &err), err));
-        CL_CHECK((backend_ctx->kernel_rope_multi_f32  = clCreateKernel(backend_ctx->program_rope, "kernel_rope_multi_f32", &err), err));
-        CL_CHECK((backend_ctx->kernel_rope_multi_f16  = clCreateKernel(backend_ctx->program_rope, "kernel_rope_multi_f16", &err), err));
-        CL_CHECK((backend_ctx->kernel_rope_vision_f32 = clCreateKernel(backend_ctx->program_rope, "kernel_rope_vision_f32", &err), err));
-        CL_CHECK((backend_ctx->kernel_rope_vision_f16 = clCreateKernel(backend_ctx->program_rope, "kernel_rope_vision_f16", &err), err));
+        if (backend_ctx->program_rope) { CL_CHECK((backend_ctx->kernel_rope_norm_f32 = clCreateKernel(backend_ctx->program_rope, "kernel_rope_norm_f32", &err), err)); } else { backend_ctx->kernel_rope_norm_f32 = nullptr; }
+        if (backend_ctx->program_rope) { CL_CHECK((backend_ctx->kernel_rope_norm_f16 = clCreateKernel(backend_ctx->program_rope, "kernel_rope_norm_f16", &err), err)); } else { backend_ctx->kernel_rope_norm_f16 = nullptr; }
+        if (backend_ctx->program_rope) { CL_CHECK((backend_ctx->kernel_rope_neox_f32 = clCreateKernel(backend_ctx->program_rope, "kernel_rope_neox_f32", &err), err)); } else { backend_ctx->kernel_rope_neox_f32 = nullptr; }
+        if (backend_ctx->program_rope) { CL_CHECK((backend_ctx->kernel_rope_neox_f16 = clCreateKernel(backend_ctx->program_rope, "kernel_rope_neox_f16", &err), err)); } else { backend_ctx->kernel_rope_neox_f16 = nullptr; }
+        if (backend_ctx->program_rope) { CL_CHECK((backend_ctx->kernel_rope_multi_f32 = clCreateKernel(backend_ctx->program_rope, "kernel_rope_multi_f32", &err), err)); } else { backend_ctx->kernel_rope_multi_f32 = nullptr; }
+        if (backend_ctx->program_rope) { CL_CHECK((backend_ctx->kernel_rope_multi_f16 = clCreateKernel(backend_ctx->program_rope, "kernel_rope_multi_f16", &err), err)); } else { backend_ctx->kernel_rope_multi_f16 = nullptr; }
+        if (backend_ctx->program_rope) { CL_CHECK((backend_ctx->kernel_rope_vision_f32 = clCreateKernel(backend_ctx->program_rope, "kernel_rope_vision_f32", &err), err)); } else { backend_ctx->kernel_rope_vision_f32 = nullptr; }
+        if (backend_ctx->program_rope) { CL_CHECK((backend_ctx->kernel_rope_vision_f16 = clCreateKernel(backend_ctx->program_rope, "kernel_rope_vision_f16", &err), err)); } else { backend_ctx->kernel_rope_vision_f16 = nullptr; }
         GGML_LOG_CONT(".");
     }
 
@@ -2035,8 +2058,8 @@ static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx, ggml_cl_ve
         cl_program prog =
             build_program_from_source(backend_ctx->context, backend_ctx->device, kernel_src.c_str(), compile_opts);
 
-        CL_CHECK((backend_ctx->kernel_scale_f32   = clCreateKernel(prog, "kernel_scale_f32", &err), err));
-        CL_CHECK((backend_ctx->kernel_scale_f32_4 = clCreateKernel(prog, "kernel_scale_f32_4", &err), err));
+        if (prog) { CL_CHECK((backend_ctx->kernel_scale_f32 = clCreateKernel(prog, "kernel_scale_f32", &err), err)); } else { backend_ctx->kernel_scale_f32 = nullptr; }
+        if (prog) { CL_CHECK((backend_ctx->kernel_scale_f32_4 = clCreateKernel(prog, "kernel_scale_f32_4", &err), err)); } else { backend_ctx->kernel_scale_f32_4 = nullptr; }
         CL_CHECK(clReleaseProgram(prog));
         GGML_LOG_CONT(".");
     }
@@ -2053,8 +2076,8 @@ static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx, ggml_cl_ve
         backend_ctx->program_silu =
             build_program_from_source(backend_ctx->context, backend_ctx->device, kernel_src.c_str(), compile_opts);
 
-        CL_CHECK((backend_ctx->kernel_silu   = clCreateKernel(backend_ctx->program_silu, "kernel_silu", &err), err));
-        CL_CHECK((backend_ctx->kernel_silu_4 = clCreateKernel(backend_ctx->program_silu, "kernel_silu_4", &err), err));
+        if (backend_ctx->program_silu) { CL_CHECK((backend_ctx->kernel_silu = clCreateKernel(backend_ctx->program_silu, "kernel_silu", &err), err)); } else { backend_ctx->kernel_silu = nullptr; }
+        if (backend_ctx->program_silu) { CL_CHECK((backend_ctx->kernel_silu_4 = clCreateKernel(backend_ctx->program_silu, "kernel_silu_4", &err), err)); } else { backend_ctx->kernel_silu_4 = nullptr; }
         GGML_LOG_CONT(".");
     }
 
@@ -2070,7 +2093,7 @@ static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx, ggml_cl_ve
         backend_ctx->program_softmax_f32 =
             build_program_from_source(backend_ctx->context, backend_ctx->device, kernel_src.c_str(), compile_opts);
 
-        CL_CHECK((backend_ctx->kernel_soft_max = clCreateKernel(backend_ctx->program_softmax_f32, "kernel_soft_max", &err), err));
+        if (backend_ctx->program_softmax_f32) { CL_CHECK((backend_ctx->kernel_soft_max = clCreateKernel(backend_ctx->program_softmax_f32, "kernel_soft_max", &err), err)); } else { backend_ctx->kernel_soft_max = nullptr; }
         GGML_LOG_CONT(".");
     }
 
@@ -2086,7 +2109,7 @@ static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx, ggml_cl_ve
         backend_ctx->program_softmax_f16 =
             build_program_from_source(backend_ctx->context, backend_ctx->device, kernel_src.c_str(), compile_opts);
 
-        CL_CHECK((backend_ctx->kernel_soft_max_f16 = clCreateKernel(backend_ctx->program_softmax_f16, "kernel_soft_max_f16", &err), err));
+        if (backend_ctx->program_softmax_f16) { CL_CHECK((backend_ctx->kernel_soft_max_f16 = clCreateKernel(backend_ctx->program_softmax_f16, "kernel_soft_max_f16", &err), err)); } else { backend_ctx->kernel_soft_max_f16 = nullptr; }
         GGML_LOG_CONT(".");
     }
 
@@ -2102,7 +2125,7 @@ static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx, ggml_cl_ve
         backend_ctx->program_softmax_4_f32 =
             build_program_from_source(backend_ctx->context, backend_ctx->device, kernel_src.c_str(), compile_opts);
 
-        CL_CHECK((backend_ctx->kernel_soft_max_4 = clCreateKernel(backend_ctx->program_softmax_4_f32, "kernel_soft_max_4", &err), err));
+        if (backend_ctx->program_softmax_4_f32) { CL_CHECK((backend_ctx->kernel_soft_max_4 = clCreateKernel(backend_ctx->program_softmax_4_f32, "kernel_soft_max_4", &err), err)); } else { backend_ctx->kernel_soft_max_4 = nullptr; }
         GGML_LOG_CONT(".");
     }
 
@@ -2118,7 +2141,7 @@ static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx, ggml_cl_ve
         backend_ctx->program_softmax_4_f16 =
             build_program_from_source(backend_ctx->context, backend_ctx->device, kernel_src.c_str(), compile_opts);
 
-        CL_CHECK((backend_ctx->kernel_soft_max_4_f16 = clCreateKernel(backend_ctx->program_softmax_4_f16, "kernel_soft_max_4_f16", &err), err));
+        if (backend_ctx->program_softmax_4_f16) { CL_CHECK((backend_ctx->kernel_soft_max_4_f16 = clCreateKernel(backend_ctx->program_softmax_4_f16, "kernel_soft_max_4_f16", &err), err)); } else { backend_ctx->kernel_soft_max_4_f16 = nullptr; }
         GGML_LOG_CONT(".");
     }
 
@@ -2201,7 +2224,7 @@ static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx, ggml_cl_ve
         backend_ctx->program_argsort_f32_i32 =
             build_program_from_source(backend_ctx->context, backend_ctx->device, kernel_src.c_str(), compile_opts);
 
-        CL_CHECK((backend_ctx->kernel_argsort_f32_i32 = clCreateKernel(backend_ctx->program_argsort_f32_i32, "kernel_argsort_f32_i32", &err), err));
+        if (backend_ctx->program_argsort_f32_i32) { CL_CHECK((backend_ctx->kernel_argsort_f32_i32 = clCreateKernel(backend_ctx->program_argsort_f32_i32, "kernel_argsort_f32_i32", &err), err)); } else { backend_ctx->kernel_argsort_f32_i32 = nullptr; }
         GGML_LOG_CONT(".");
     }
 
@@ -2220,10 +2243,10 @@ static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx, ggml_cl_ve
         backend_ctx->program_div =
             build_program_from_source(backend_ctx->context, backend_ctx->device, kernel_src.c_str(), compile_opts);
 
-        CL_CHECK((backend_ctx->kernel_div         = clCreateKernel(backend_ctx->program_div, "kernel_div", &err), err));
-        CL_CHECK((backend_ctx->kernel_div_row     = clCreateKernel(backend_ctx->program_div, "kernel_div_row", &err), err));
-        CL_CHECK((backend_ctx->kernel_div_f16     = clCreateKernel(backend_ctx->program_div, "kernel_div_f16", &err), err));
-        CL_CHECK((backend_ctx->kernel_div_row_f16 = clCreateKernel(backend_ctx->program_div, "kernel_div_row_f16", &err), err));
+        if (backend_ctx->program_div) { CL_CHECK((backend_ctx->kernel_div = clCreateKernel(backend_ctx->program_div, "kernel_div", &err), err)); } else { backend_ctx->kernel_div = nullptr; }
+        if (backend_ctx->program_div) { CL_CHECK((backend_ctx->kernel_div_row = clCreateKernel(backend_ctx->program_div, "kernel_div_row", &err), err)); } else { backend_ctx->kernel_div_row = nullptr; }
+        if (backend_ctx->program_div) { CL_CHECK((backend_ctx->kernel_div_f16 = clCreateKernel(backend_ctx->program_div, "kernel_div_f16", &err), err)); } else { backend_ctx->kernel_div_f16 = nullptr; }
+        if (backend_ctx->program_div) { CL_CHECK((backend_ctx->kernel_div_row_f16 = clCreateKernel(backend_ctx->program_div, "kernel_div_row_f16", &err), err)); } else { backend_ctx->kernel_div_row_f16 = nullptr; }
         GGML_LOG_CONT(".");
     }
 
@@ -2239,10 +2262,10 @@ static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx, ggml_cl_ve
         cl_program prog =
             build_program_from_source(backend_ctx->context, backend_ctx->device, kernel_src.c_str(), compile_opts);
 
-        CL_CHECK((backend_ctx->kernel_sqr_cont_f32     = clCreateKernel(prog, "kernel_sqr_cont_f32", &err), err));
-        CL_CHECK((backend_ctx->kernel_sqr_cont_f32_4   = clCreateKernel(prog, "kernel_sqr_cont_f32_4", &err), err));
-        CL_CHECK((backend_ctx->kernel_sqr_cont_f16     = clCreateKernel(prog, "kernel_sqr_cont_f16", &err), err));
-        CL_CHECK((backend_ctx->kernel_sqr_cont_f16_4   = clCreateKernel(prog, "kernel_sqr_cont_f16_4", &err), err));
+        if (prog) { CL_CHECK((backend_ctx->kernel_sqr_cont_f32 = clCreateKernel(prog, "kernel_sqr_cont_f32", &err), err)); } else { backend_ctx->kernel_sqr_cont_f32 = nullptr; }
+        if (prog) { CL_CHECK((backend_ctx->kernel_sqr_cont_f32_4 = clCreateKernel(prog, "kernel_sqr_cont_f32_4", &err), err)); } else { backend_ctx->kernel_sqr_cont_f32_4 = nullptr; }
+        if (prog) { CL_CHECK((backend_ctx->kernel_sqr_cont_f16 = clCreateKernel(prog, "kernel_sqr_cont_f16", &err), err)); } else { backend_ctx->kernel_sqr_cont_f16 = nullptr; }
+        if (prog) { CL_CHECK((backend_ctx->kernel_sqr_cont_f16_4 = clCreateKernel(prog, "kernel_sqr_cont_f16_4", &err), err)); } else { backend_ctx->kernel_sqr_cont_f16_4 = nullptr; }
 
         CL_CHECK(clReleaseProgram(prog));
         GGML_LOG_CONT(".");
@@ -2260,10 +2283,10 @@ static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx, ggml_cl_ve
         cl_program prog =
             build_program_from_source(backend_ctx->context, backend_ctx->device, kernel_src.c_str(), compile_opts);
 
-        CL_CHECK((backend_ctx->kernel_sqrt_cont_f32     = clCreateKernel(prog, "kernel_sqrt_cont_f32", &err), err));
-        CL_CHECK((backend_ctx->kernel_sqrt_cont_f32_4   = clCreateKernel(prog, "kernel_sqrt_cont_f32_4", &err), err));
-        CL_CHECK((backend_ctx->kernel_sqrt_cont_f16     = clCreateKernel(prog, "kernel_sqrt_cont_f16", &err), err));
-        CL_CHECK((backend_ctx->kernel_sqrt_cont_f16_4   = clCreateKernel(prog, "kernel_sqrt_cont_f16_4", &err), err));
+        if (prog) { CL_CHECK((backend_ctx->kernel_sqrt_cont_f32 = clCreateKernel(prog, "kernel_sqrt_cont_f32", &err), err)); } else { backend_ctx->kernel_sqrt_cont_f32 = nullptr; }
+        if (prog) { CL_CHECK((backend_ctx->kernel_sqrt_cont_f32_4 = clCreateKernel(prog, "kernel_sqrt_cont_f32_4", &err), err)); } else { backend_ctx->kernel_sqrt_cont_f32_4 = nullptr; }
+        if (prog) { CL_CHECK((backend_ctx->kernel_sqrt_cont_f16 = clCreateKernel(prog, "kernel_sqrt_cont_f16", &err), err)); } else { backend_ctx->kernel_sqrt_cont_f16 = nullptr; }
+        if (prog) { CL_CHECK((backend_ctx->kernel_sqrt_cont_f16_4 = clCreateKernel(prog, "kernel_sqrt_cont_f16_4", &err), err)); } else { backend_ctx->kernel_sqrt_cont_f16_4 = nullptr; }
 
         CL_CHECK(clReleaseProgram(prog));
         GGML_LOG_CONT(".");
@@ -2281,8 +2304,8 @@ static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx, ggml_cl_ve
         cl_program prog =
             build_program_from_source(backend_ctx->context, backend_ctx->device, kernel_src.c_str(), compile_opts);
 
-        CL_CHECK((backend_ctx->kernel_mean_f32 = clCreateKernel(prog, "kernel_mean_f32", &err), err));
-        CL_CHECK((backend_ctx->kernel_mean_f32_4 = clCreateKernel(prog, "kernel_mean_f32_4", &err), err));
+        if (prog) { CL_CHECK((backend_ctx->kernel_mean_f32 = clCreateKernel(prog, "kernel_mean_f32", &err), err)); } else { backend_ctx->kernel_mean_f32 = nullptr; }
+        if (prog) { CL_CHECK((backend_ctx->kernel_mean_f32_4 = clCreateKernel(prog, "kernel_mean_f32_4", &err), err)); } else { backend_ctx->kernel_mean_f32_4 = nullptr; }
 
         CL_CHECK(clReleaseProgram(prog));
         GGML_LOG_CONT(".");
@@ -2300,10 +2323,10 @@ static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx, ggml_cl_ve
         backend_ctx->program_sub =
             build_program_from_source(backend_ctx->context, backend_ctx->device, kernel_src.c_str(), compile_opts);
 
-        CL_CHECK((backend_ctx->kernel_sub         = clCreateKernel(backend_ctx->program_sub, "kernel_sub", &err), err));
-        CL_CHECK((backend_ctx->kernel_sub_row     = clCreateKernel(backend_ctx->program_sub, "kernel_sub_row", &err), err));
-        CL_CHECK((backend_ctx->kernel_sub_f16     = clCreateKernel(backend_ctx->program_sub, "kernel_sub_f16", &err), err));
-        CL_CHECK((backend_ctx->kernel_sub_row_f16 = clCreateKernel(backend_ctx->program_sub, "kernel_sub_row_f16", &err), err));
+        if (backend_ctx->program_sub) { CL_CHECK((backend_ctx->kernel_sub = clCreateKernel(backend_ctx->program_sub, "kernel_sub", &err), err)); } else { backend_ctx->kernel_sub = nullptr; }
+        if (backend_ctx->program_sub) { CL_CHECK((backend_ctx->kernel_sub_row = clCreateKernel(backend_ctx->program_sub, "kernel_sub_row", &err), err)); } else { backend_ctx->kernel_sub_row = nullptr; }
+        if (backend_ctx->program_sub) { CL_CHECK((backend_ctx->kernel_sub_f16 = clCreateKernel(backend_ctx->program_sub, "kernel_sub_f16", &err), err)); } else { backend_ctx->kernel_sub_f16 = nullptr; }
+        if (backend_ctx->program_sub) { CL_CHECK((backend_ctx->kernel_sub_row_f16 = clCreateKernel(backend_ctx->program_sub, "kernel_sub_row_f16", &err), err)); } else { backend_ctx->kernel_sub_row_f16 = nullptr; }
         GGML_LOG_CONT(".");
     }
 
@@ -2319,8 +2342,8 @@ static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx, ggml_cl_ve
         backend_ctx->program_sum_rows_f32 =
             build_program_from_source(backend_ctx->context, backend_ctx->device, kernel_src.c_str(), compile_opts);
 
-        CL_CHECK((backend_ctx->kernel_sum_rows_f32 = clCreateKernel(backend_ctx->program_sum_rows_f32, "kernel_sum_rows_f32", &err), err));
-        CL_CHECK((backend_ctx->kernel_sum_rows_f32_4 = clCreateKernel(backend_ctx->program_sum_rows_f32, "kernel_sum_rows_f32_4", &err), err));
+        if (backend_ctx->program_sum_rows_f32) { CL_CHECK((backend_ctx->kernel_sum_rows_f32 = clCreateKernel(backend_ctx->program_sum_rows_f32, "kernel_sum_rows_f32", &err), err)); } else { backend_ctx->kernel_sum_rows_f32 = nullptr; }
+        if (backend_ctx->program_sum_rows_f32) { CL_CHECK((backend_ctx->kernel_sum_rows_f32_4 = clCreateKernel(backend_ctx->program_sum_rows_f32, "kernel_sum_rows_f32_4", &err), err)); } else { backend_ctx->kernel_sum_rows_f32_4 = nullptr; }
         GGML_LOG_CONT(".");
     }
 
@@ -2336,8 +2359,8 @@ static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx, ggml_cl_ve
         cl_program prog;
         prog = build_program_from_source(backend_ctx->context, backend_ctx->device, kernel_src.c_str(), compile_opts);
 
-        CL_CHECK((backend_ctx->kernel_cumsum_blk = clCreateKernel(prog, "kernel_cumsum_blk", &err), err));
-        CL_CHECK((backend_ctx->kernel_cumsum_add = clCreateKernel(prog, "kernel_cumsum_add", &err), err));
+        if (prog) { CL_CHECK((backend_ctx->kernel_cumsum_blk = clCreateKernel(prog, "kernel_cumsum_blk", &err), err)); } else { backend_ctx->kernel_cumsum_blk = nullptr; }
+        if (prog) { CL_CHECK((backend_ctx->kernel_cumsum_add = clCreateKernel(prog, "kernel_cumsum_add", &err), err)); } else { backend_ctx->kernel_cumsum_add = nullptr; }
         GGML_LOG_CONT(".");
         CL_CHECK(clReleaseProgram(prog));
     }
@@ -2354,8 +2377,8 @@ static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx, ggml_cl_ve
         backend_ctx->program_sigmoid =
             build_program_from_source(backend_ctx->context, backend_ctx->device, kernel_src.c_str(), compile_opts);
 
-        CL_CHECK((backend_ctx->kernel_sigmoid_f32 = clCreateKernel(backend_ctx->program_sigmoid, "kernel_sigmoid_f32", &err), err));
-        CL_CHECK((backend_ctx->kernel_sigmoid_f16 = clCreateKernel(backend_ctx->program_sigmoid, "kernel_sigmoid_f16", &err), err));
+        if (backend_ctx->program_sigmoid) { CL_CHECK((backend_ctx->kernel_sigmoid_f32 = clCreateKernel(backend_ctx->program_sigmoid, "kernel_sigmoid_f32", &err), err)); } else { backend_ctx->kernel_sigmoid_f32 = nullptr; }
+        if (backend_ctx->program_sigmoid) { CL_CHECK((backend_ctx->kernel_sigmoid_f16 = clCreateKernel(backend_ctx->program_sigmoid, "kernel_sigmoid_f16", &err), err)); } else { backend_ctx->kernel_sigmoid_f16 = nullptr; }
         GGML_LOG_CONT(".");
     }
 
@@ -2371,8 +2394,8 @@ static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx, ggml_cl_ve
         backend_ctx->program_group_norm =
             build_program_from_source(backend_ctx->context, backend_ctx->device, kernel_src.c_str(), compile_opts);
 
-        CL_CHECK((backend_ctx->kernel_group_norm         = clCreateKernel(backend_ctx->program_group_norm, "kernel_group_norm", &err), err));
-        CL_CHECK((backend_ctx->kernel_group_norm_mul_add = clCreateKernel(backend_ctx->program_group_norm, "kernel_group_norm_mul_add", &err), err));
+        if (backend_ctx->program_group_norm) { CL_CHECK((backend_ctx->kernel_group_norm = clCreateKernel(backend_ctx->program_group_norm, "kernel_group_norm", &err), err)); } else { backend_ctx->kernel_group_norm = nullptr; }
+        if (backend_ctx->program_group_norm) { CL_CHECK((backend_ctx->kernel_group_norm_mul_add = clCreateKernel(backend_ctx->program_group_norm, "kernel_group_norm_mul_add", &err), err)); } else { backend_ctx->kernel_group_norm_mul_add = nullptr; }
         GGML_LOG_CONT(".");
     }
 
@@ -2387,7 +2410,7 @@ static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx, ggml_cl_ve
 #endif
         cl_program prog =
             build_program_from_source(backend_ctx->context, backend_ctx->device, kernel_src.c_str(), compile_opts);
-        CL_CHECK((backend_ctx->kernel_repeat_f32 = clCreateKernel(prog, "kernel_repeat_f32", &err), err));
+        if (prog) { CL_CHECK((backend_ctx->kernel_repeat_f32 = clCreateKernel(prog, "kernel_repeat_f32", &err), err)); } else { backend_ctx->kernel_repeat_f32 = nullptr; }
         CL_CHECK(clReleaseProgram(prog));
         GGML_LOG_CONT(".");
     }
@@ -2404,7 +2427,7 @@ static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx, ggml_cl_ve
         if (!kernel_src.empty()) {
             backend_ctx->program_pad =
                 build_program_from_source(backend_ctx->context, backend_ctx->device, kernel_src.c_str(), compile_opts);
-            CL_CHECK((backend_ctx->kernel_pad = clCreateKernel(backend_ctx->program_pad, "kernel_pad", &err), err));
+            if (backend_ctx->program_pad) { CL_CHECK((backend_ctx->kernel_pad = clCreateKernel(backend_ctx->program_pad, "kernel_pad", &err), err)); } else { backend_ctx->kernel_pad = nullptr; }
             GGML_LOG_CONT(".");
         } else {
             GGML_LOG_WARN("ggml_opencl: pad kernel source not found or empty. Pad operations will not be available.\n");
@@ -2424,12 +2447,12 @@ static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx, ggml_cl_ve
 #endif
         cl_program prog =
             build_program_from_source(backend_ctx->context, backend_ctx->device, kernel_src.c_str(), compile_opts);
-        CL_CHECK((backend_ctx->kernel_tanh_f32    = clCreateKernel(prog, "kernel_tanh_f32", &err), err));
-        CL_CHECK((backend_ctx->kernel_tanh_f32_4  = clCreateKernel(prog, "kernel_tanh_f32_4", &err), err));
-        CL_CHECK((backend_ctx->kernel_tanh_f32_nc = clCreateKernel(prog, "kernel_tanh_f32_nc", &err), err));
-        CL_CHECK((backend_ctx->kernel_tanh_f16    = clCreateKernel(prog, "kernel_tanh_f16", &err), err));
-        CL_CHECK((backend_ctx->kernel_tanh_f16_4  = clCreateKernel(prog, "kernel_tanh_f16_4", &err), err));
-        CL_CHECK((backend_ctx->kernel_tanh_f16_nc = clCreateKernel(prog, "kernel_tanh_f16_nc", &err), err));
+        if (prog) { CL_CHECK((backend_ctx->kernel_tanh_f32 = clCreateKernel(prog, "kernel_tanh_f32", &err), err)); } else { backend_ctx->kernel_tanh_f32 = nullptr; }
+        if (prog) { CL_CHECK((backend_ctx->kernel_tanh_f32_4 = clCreateKernel(prog, "kernel_tanh_f32_4", &err), err)); } else { backend_ctx->kernel_tanh_f32_4 = nullptr; }
+        if (prog) { CL_CHECK((backend_ctx->kernel_tanh_f32_nc = clCreateKernel(prog, "kernel_tanh_f32_nc", &err), err)); } else { backend_ctx->kernel_tanh_f32_nc = nullptr; }
+        if (prog) { CL_CHECK((backend_ctx->kernel_tanh_f16 = clCreateKernel(prog, "kernel_tanh_f16", &err), err)); } else { backend_ctx->kernel_tanh_f16 = nullptr; }
+        if (prog) { CL_CHECK((backend_ctx->kernel_tanh_f16_4 = clCreateKernel(prog, "kernel_tanh_f16_4", &err), err)); } else { backend_ctx->kernel_tanh_f16_4 = nullptr; }
+        if (prog) { CL_CHECK((backend_ctx->kernel_tanh_f16_nc = clCreateKernel(prog, "kernel_tanh_f16_nc", &err), err)); } else { backend_ctx->kernel_tanh_f16_nc = nullptr; }
         CL_CHECK(clReleaseProgram(prog));
         GGML_LOG_CONT(".");
     }
@@ -2445,12 +2468,12 @@ static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx, ggml_cl_ve
 #endif
         cl_program prog =
             build_program_from_source(backend_ctx->context, backend_ctx->device, kernel_src.c_str(), compile_opts);
-        CL_CHECK((backend_ctx->kernel_neg_f32    = clCreateKernel(prog, "kernel_neg_f32", &err), err));
-        CL_CHECK((backend_ctx->kernel_neg_f32_4  = clCreateKernel(prog, "kernel_neg_f32_4", &err), err));
-        CL_CHECK((backend_ctx->kernel_neg_f32_nc = clCreateKernel(prog, "kernel_neg_f32_nc", &err), err));
-        CL_CHECK((backend_ctx->kernel_neg_f16    = clCreateKernel(prog, "kernel_neg_f16", &err), err));
-        CL_CHECK((backend_ctx->kernel_neg_f16_4  = clCreateKernel(prog, "kernel_neg_f16_4", &err), err));
-        CL_CHECK((backend_ctx->kernel_neg_f16_nc = clCreateKernel(prog, "kernel_neg_f16_nc", &err), err));
+        if (prog) { CL_CHECK((backend_ctx->kernel_neg_f32 = clCreateKernel(prog, "kernel_neg_f32", &err), err)); } else { backend_ctx->kernel_neg_f32 = nullptr; }
+        if (prog) { CL_CHECK((backend_ctx->kernel_neg_f32_4 = clCreateKernel(prog, "kernel_neg_f32_4", &err), err)); } else { backend_ctx->kernel_neg_f32_4 = nullptr; }
+        if (prog) { CL_CHECK((backend_ctx->kernel_neg_f32_nc = clCreateKernel(prog, "kernel_neg_f32_nc", &err), err)); } else { backend_ctx->kernel_neg_f32_nc = nullptr; }
+        if (prog) { CL_CHECK((backend_ctx->kernel_neg_f16 = clCreateKernel(prog, "kernel_neg_f16", &err), err)); } else { backend_ctx->kernel_neg_f16 = nullptr; }
+        if (prog) { CL_CHECK((backend_ctx->kernel_neg_f16_4 = clCreateKernel(prog, "kernel_neg_f16_4", &err), err)); } else { backend_ctx->kernel_neg_f16_4 = nullptr; }
+        if (prog) { CL_CHECK((backend_ctx->kernel_neg_f16_nc = clCreateKernel(prog, "kernel_neg_f16_nc", &err), err)); } else { backend_ctx->kernel_neg_f16_nc = nullptr; }
         CL_CHECK(clReleaseProgram(prog));
         GGML_LOG_CONT(".");
     }
@@ -2466,12 +2489,12 @@ static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx, ggml_cl_ve
 #endif
         cl_program prog =
             build_program_from_source(backend_ctx->context, backend_ctx->device, kernel_src.c_str(), compile_opts);
-        CL_CHECK((backend_ctx->kernel_exp_f32    = clCreateKernel(prog, "kernel_exp_f32", &err), err));
-        CL_CHECK((backend_ctx->kernel_exp_f32_4  = clCreateKernel(prog, "kernel_exp_f32_4", &err), err));
-        CL_CHECK((backend_ctx->kernel_exp_f32_nc = clCreateKernel(prog, "kernel_exp_f32_nc", &err), err));
-        CL_CHECK((backend_ctx->kernel_exp_f16    = clCreateKernel(prog, "kernel_exp_f16", &err), err));
-        CL_CHECK((backend_ctx->kernel_exp_f16_4  = clCreateKernel(prog, "kernel_exp_f16_4", &err), err));
-        CL_CHECK((backend_ctx->kernel_exp_f16_nc = clCreateKernel(prog, "kernel_exp_f16_nc", &err), err));
+        if (prog) { CL_CHECK((backend_ctx->kernel_exp_f32 = clCreateKernel(prog, "kernel_exp_f32", &err), err)); } else { backend_ctx->kernel_exp_f32 = nullptr; }
+        if (prog) { CL_CHECK((backend_ctx->kernel_exp_f32_4 = clCreateKernel(prog, "kernel_exp_f32_4", &err), err)); } else { backend_ctx->kernel_exp_f32_4 = nullptr; }
+        if (prog) { CL_CHECK((backend_ctx->kernel_exp_f32_nc = clCreateKernel(prog, "kernel_exp_f32_nc", &err), err)); } else { backend_ctx->kernel_exp_f32_nc = nullptr; }
+        if (prog) { CL_CHECK((backend_ctx->kernel_exp_f16 = clCreateKernel(prog, "kernel_exp_f16", &err), err)); } else { backend_ctx->kernel_exp_f16 = nullptr; }
+        if (prog) { CL_CHECK((backend_ctx->kernel_exp_f16_4 = clCreateKernel(prog, "kernel_exp_f16_4", &err), err)); } else { backend_ctx->kernel_exp_f16_4 = nullptr; }
+        if (prog) { CL_CHECK((backend_ctx->kernel_exp_f16_nc = clCreateKernel(prog, "kernel_exp_f16_nc", &err), err)); } else { backend_ctx->kernel_exp_f16_nc = nullptr; }
         CL_CHECK(clReleaseProgram(prog));
         GGML_LOG_CONT(".");
     }
@@ -2487,12 +2510,12 @@ static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx, ggml_cl_ve
 #endif
         cl_program prog =
             build_program_from_source(backend_ctx->context, backend_ctx->device, kernel_src.c_str(), compile_opts);
-        CL_CHECK((backend_ctx->kernel_expm1_f32    = clCreateKernel(prog, "kernel_expm1_f32", &err), err));
-        CL_CHECK((backend_ctx->kernel_expm1_f32_4  = clCreateKernel(prog, "kernel_expm1_f32_4", &err), err));
-        CL_CHECK((backend_ctx->kernel_expm1_f32_nc = clCreateKernel(prog, "kernel_expm1_f32_nc", &err), err));
-        CL_CHECK((backend_ctx->kernel_expm1_f16    = clCreateKernel(prog, "kernel_expm1_f16", &err), err));
-        CL_CHECK((backend_ctx->kernel_expm1_f16_4  = clCreateKernel(prog, "kernel_expm1_f16_4", &err), err));
-        CL_CHECK((backend_ctx->kernel_expm1_f16_nc = clCreateKernel(prog, "kernel_expm1_f16_nc", &err), err));
+        if (prog) { CL_CHECK((backend_ctx->kernel_expm1_f32 = clCreateKernel(prog, "kernel_expm1_f32", &err), err)); } else { backend_ctx->kernel_expm1_f32 = nullptr; }
+        if (prog) { CL_CHECK((backend_ctx->kernel_expm1_f32_4 = clCreateKernel(prog, "kernel_expm1_f32_4", &err), err)); } else { backend_ctx->kernel_expm1_f32_4 = nullptr; }
+        if (prog) { CL_CHECK((backend_ctx->kernel_expm1_f32_nc = clCreateKernel(prog, "kernel_expm1_f32_nc", &err), err)); } else { backend_ctx->kernel_expm1_f32_nc = nullptr; }
+        if (prog) { CL_CHECK((backend_ctx->kernel_expm1_f16 = clCreateKernel(prog, "kernel_expm1_f16", &err), err)); } else { backend_ctx->kernel_expm1_f16 = nullptr; }
+        if (prog) { CL_CHECK((backend_ctx->kernel_expm1_f16_4 = clCreateKernel(prog, "kernel_expm1_f16_4", &err), err)); } else { backend_ctx->kernel_expm1_f16_4 = nullptr; }
+        if (prog) { CL_CHECK((backend_ctx->kernel_expm1_f16_nc = clCreateKernel(prog, "kernel_expm1_f16_nc", &err), err)); } else { backend_ctx->kernel_expm1_f16_nc = nullptr; }
         CL_CHECK(clReleaseProgram(prog));
         GGML_LOG_CONT(".");
     }
@@ -2508,12 +2531,12 @@ static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx, ggml_cl_ve
 #endif
         cl_program prog =
             build_program_from_source(backend_ctx->context, backend_ctx->device, kernel_src.c_str(), compile_opts);
-        CL_CHECK((backend_ctx->kernel_softplus_f32    = clCreateKernel(prog, "kernel_softplus_f32", &err), err));
-        CL_CHECK((backend_ctx->kernel_softplus_f32_4  = clCreateKernel(prog, "kernel_softplus_f32_4", &err), err));
-        CL_CHECK((backend_ctx->kernel_softplus_f32_nc = clCreateKernel(prog, "kernel_softplus_f32_nc", &err), err));
-        CL_CHECK((backend_ctx->kernel_softplus_f16    = clCreateKernel(prog, "kernel_softplus_f16", &err), err));
-        CL_CHECK((backend_ctx->kernel_softplus_f16_4  = clCreateKernel(prog, "kernel_softplus_f16_4", &err), err));
-        CL_CHECK((backend_ctx->kernel_softplus_f16_nc = clCreateKernel(prog, "kernel_softplus_f16_nc", &err), err));
+        if (prog) { CL_CHECK((backend_ctx->kernel_softplus_f32 = clCreateKernel(prog, "kernel_softplus_f32", &err), err)); } else { backend_ctx->kernel_softplus_f32 = nullptr; }
+        if (prog) { CL_CHECK((backend_ctx->kernel_softplus_f32_4 = clCreateKernel(prog, "kernel_softplus_f32_4", &err), err)); } else { backend_ctx->kernel_softplus_f32_4 = nullptr; }
+        if (prog) { CL_CHECK((backend_ctx->kernel_softplus_f32_nc = clCreateKernel(prog, "kernel_softplus_f32_nc", &err), err)); } else { backend_ctx->kernel_softplus_f32_nc = nullptr; }
+        if (prog) { CL_CHECK((backend_ctx->kernel_softplus_f16 = clCreateKernel(prog, "kernel_softplus_f16", &err), err)); } else { backend_ctx->kernel_softplus_f16 = nullptr; }
+        if (prog) { CL_CHECK((backend_ctx->kernel_softplus_f16_4 = clCreateKernel(prog, "kernel_softplus_f16_4", &err), err)); } else { backend_ctx->kernel_softplus_f16_4 = nullptr; }
+        if (prog) { CL_CHECK((backend_ctx->kernel_softplus_f16_nc = clCreateKernel(prog, "kernel_softplus_f16_nc", &err), err)); } else { backend_ctx->kernel_softplus_f16_nc = nullptr; }
         CL_CHECK(clReleaseProgram(prog));
         GGML_LOG_CONT(".");
     }
@@ -2530,7 +2553,7 @@ static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx, ggml_cl_ve
         if (!kernel_src.empty()) {
             backend_ctx->program_upscale =
                 build_program_from_source(backend_ctx->context, backend_ctx->device, kernel_src.c_str(), compile_opts);
-            CL_CHECK((backend_ctx->kernel_upscale = clCreateKernel(backend_ctx->program_upscale, "kernel_upscale", &err), err));
+            if (backend_ctx->program_upscale) { CL_CHECK((backend_ctx->kernel_upscale = clCreateKernel(backend_ctx->program_upscale, "kernel_upscale", &err), err)); } else { backend_ctx->kernel_upscale = nullptr; }
             if (backend_ctx->program_upscale) {
                  cl_int err_bilinear;
                  backend_ctx->kernel_upscale_bilinear = clCreateKernel(backend_ctx->program_upscale, "kernel_upscale_bilinear", &err_bilinear);
@@ -2561,7 +2584,7 @@ static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx, ggml_cl_ve
 #endif
         cl_program prog =
             build_program_from_source(backend_ctx->context, backend_ctx->device, kernel_src.c_str(), compile_opts);
-        CL_CHECK((backend_ctx->kernel_concat_f32 = clCreateKernel(prog, "kernel_concat_f32", &err), err));
+        if (prog) { CL_CHECK((backend_ctx->kernel_concat_f32 = clCreateKernel(prog, "kernel_concat_f32", &err), err)); } else { backend_ctx->kernel_concat_f32 = nullptr; }
         CL_CHECK(clReleaseProgram(prog));
         GGML_LOG_CONT(".");
     }
@@ -2579,7 +2602,7 @@ static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx, ggml_cl_ve
         if (!kernel_src.empty()) {
             backend_ctx->program_tsembd =
                 build_program_from_source(backend_ctx->context, backend_ctx->device, kernel_src.c_str(), compile_opts);
-            CL_CHECK((backend_ctx->kernel_timestep_embedding = clCreateKernel(backend_ctx->program_tsembd, "kernel_timestep_embedding", &err), err));
+            if (backend_ctx->program_tsembd) { CL_CHECK((backend_ctx->kernel_timestep_embedding = clCreateKernel(backend_ctx->program_tsembd, "kernel_timestep_embedding", &err), err)); } else { backend_ctx->kernel_timestep_embedding = nullptr; }
             GGML_LOG_CONT(".");
         } else {
             GGML_LOG_WARN("ggml_opencl: timestep_embedding kernel source not found or empty. This op will not be available.\n");
@@ -2610,11 +2633,11 @@ static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx, ggml_cl_ve
                 if (!kernel_src.empty()) {
                     backend_ctx->program_conv_2d_f16 =
                         build_program_from_source(backend_ctx->context, backend_ctx->device, kernel_src.c_str(), (std::string(compile_opts) + " -DUSE_FP16=1").c_str());
-                    CL_CHECK((backend_ctx->kernel_conv_2d_f16 = clCreateKernel(backend_ctx->program_conv_2d_f16, "kernel_conv_2d", &err), err));
+                    if (backend_ctx->program_conv_2d_f16) { CL_CHECK((backend_ctx->kernel_conv_2d_f16 = clCreateKernel(backend_ctx->program_conv_2d_f16, "kernel_conv_2d", &err), err)); } else { backend_ctx->kernel_conv_2d_f16 = nullptr; }
                     GGML_LOG_CONT(".");
                     backend_ctx->program_conv_2d_f32 =
                         build_program_from_source(backend_ctx->context, backend_ctx->device, kernel_src.c_str(), compile_opts);
-                    CL_CHECK((backend_ctx->kernel_conv_2d_f32 = clCreateKernel(backend_ctx->program_conv_2d_f32, "kernel_conv_2d", &err), err));
+                    if (backend_ctx->program_conv_2d_f32) { CL_CHECK((backend_ctx->kernel_conv_2d_f32 = clCreateKernel(backend_ctx->program_conv_2d_f32, "kernel_conv_2d", &err), err)); } else { backend_ctx->kernel_conv_2d_f32 = nullptr; }
                     GGML_LOG_CONT(".");
                 } else {
                     GGML_LOG_WARN("ggml_opencl: conv2d kernel source not found or empty. This op will not be available.\n");
@@ -2626,7 +2649,7 @@ static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx, ggml_cl_ve
                 if (!kernel_src_f16_f32.empty()) {
                     backend_ctx->program_conv_2d_f16_f32 =
                         build_program_from_source(backend_ctx->context, backend_ctx->device, kernel_src_f16_f32.c_str(), compile_opts);
-                    CL_CHECK((backend_ctx->kernel_conv_2d_f16_f32 = clCreateKernel(backend_ctx->program_conv_2d_f16_f32, "kernel_conv_2d", &err), err));
+                    if (backend_ctx->program_conv_2d_f16_f32) { CL_CHECK((backend_ctx->kernel_conv_2d_f16_f32 = clCreateKernel(backend_ctx->program_conv_2d_f16_f32, "kernel_conv_2d", &err), err)); } else { backend_ctx->kernel_conv_2d_f16_f32 = nullptr; }
                     GGML_LOG_CONT(".");
                 } else {
                     GGML_LOG_WARN("ggml_opencl: conv2d_f16_f32 kernel source not found or empty. This op will not be available.\n");
@@ -2647,8 +2670,8 @@ static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx, ggml_cl_ve
         cl_program prog =
             build_program_from_source(backend_ctx->context, backend_ctx->device, kernel_src.c_str(), compile_opts);
 
-        CL_CHECK((backend_ctx->kernel_ssm_conv_f32_f32   = clCreateKernel(prog, "kernel_ssm_conv_f32_f32", &err), err));
-        CL_CHECK((backend_ctx->kernel_ssm_conv_f32_f32_4 = clCreateKernel(prog, "kernel_ssm_conv_f32_f32_4", &err), err));
+        if (prog) { CL_CHECK((backend_ctx->kernel_ssm_conv_f32_f32 = clCreateKernel(prog, "kernel_ssm_conv_f32_f32", &err), err)); } else { backend_ctx->kernel_ssm_conv_f32_f32 = nullptr; }
+        if (prog) { CL_CHECK((backend_ctx->kernel_ssm_conv_f32_f32_4 = clCreateKernel(prog, "kernel_ssm_conv_f32_f32_4", &err), err)); } else { backend_ctx->kernel_ssm_conv_f32_f32_4 = nullptr; }
         CL_CHECK(clReleaseProgram(prog));
         GGML_LOG_CONT(".");
     }
@@ -2665,7 +2688,7 @@ static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx, ggml_cl_ve
         backend_ctx->program_mul_mv_id_q4_0_f32_8x_flat =
             build_program_from_source(backend_ctx->context, backend_ctx->device, kernel_src.c_str(), compile_opts);
 
-        CL_CHECK((backend_ctx->kernel_mul_mv_id_q4_0_f32_8x_flat = clCreateKernel(backend_ctx->program_mul_mv_id_q4_0_f32_8x_flat, "kernel_mul_mv_id_q4_0_f32_8x_flat", &err), err));
+        if (backend_ctx->program_mul_mv_id_q4_0_f32_8x_flat) { CL_CHECK((backend_ctx->kernel_mul_mv_id_q4_0_f32_8x_flat = clCreateKernel(backend_ctx->program_mul_mv_id_q4_0_f32_8x_flat, "kernel_mul_mv_id_q4_0_f32_8x_flat", &err), err)); } else { backend_ctx->kernel_mul_mv_id_q4_0_f32_8x_flat = nullptr; }
         GGML_LOG_CONT(".");
     }
 
@@ -2681,7 +2704,7 @@ static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx, ggml_cl_ve
         backend_ctx->program_mul_mv_id_q8_0_f32 =
             build_program_from_source(backend_ctx->context, backend_ctx->device, kernel_src.c_str(), compile_opts);
 
-        CL_CHECK((backend_ctx->kernel_mul_mv_id_q8_0_f32 = clCreateKernel(backend_ctx->program_mul_mv_id_q8_0_f32, "kernel_mul_mv_id_q8_0_f32", &err), err));
+        if (backend_ctx->program_mul_mv_id_q8_0_f32) { CL_CHECK((backend_ctx->kernel_mul_mv_id_q8_0_f32 = clCreateKernel(backend_ctx->program_mul_mv_id_q8_0_f32, "kernel_mul_mv_id_q8_0_f32", &err), err)); } else { backend_ctx->kernel_mul_mv_id_q8_0_f32 = nullptr; }
         GGML_LOG_CONT(".");
     }
 
@@ -2697,7 +2720,7 @@ static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx, ggml_cl_ve
         backend_ctx->program_mul_mv_id_q8_0_f32_flat =
             build_program_from_source(backend_ctx->context, backend_ctx->device, kernel_src.c_str(), compile_opts);
 
-        CL_CHECK((backend_ctx->kernel_mul_mv_id_q8_0_f32_flat = clCreateKernel(backend_ctx->program_mul_mv_id_q8_0_f32_flat, "kernel_mul_mv_id_q8_0_f32_flat", &err), err));
+        if (backend_ctx->program_mul_mv_id_q8_0_f32_flat) { CL_CHECK((backend_ctx->kernel_mul_mv_id_q8_0_f32_flat = clCreateKernel(backend_ctx->program_mul_mv_id_q8_0_f32_flat, "kernel_mul_mv_id_q8_0_f32_flat", &err), err)); } else { backend_ctx->kernel_mul_mv_id_q8_0_f32_flat = nullptr; }
         GGML_LOG_CONT(".");
     }
 
@@ -2713,7 +2736,7 @@ static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx, ggml_cl_ve
         backend_ctx->program_mul_mv_id_mxfp4_f32 =
             build_program_from_source(backend_ctx->context, backend_ctx->device, kernel_src.c_str(), compile_opts);
 
-        CL_CHECK((backend_ctx->kernel_mul_mv_id_mxfp4_f32 = clCreateKernel(backend_ctx->program_mul_mv_id_mxfp4_f32, "kernel_mul_mv_id_mxfp4_f32", &err), err));
+        if (backend_ctx->program_mul_mv_id_mxfp4_f32) { CL_CHECK((backend_ctx->kernel_mul_mv_id_mxfp4_f32 = clCreateKernel(backend_ctx->program_mul_mv_id_mxfp4_f32, "kernel_mul_mv_id_mxfp4_f32", &err), err)); } else { backend_ctx->kernel_mul_mv_id_mxfp4_f32 = nullptr; }
         GGML_LOG_CONT(".");
     }
 
@@ -2729,7 +2752,7 @@ static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx, ggml_cl_ve
         backend_ctx->program_mul_mv_id_mxfp4_f32_flat =
             build_program_from_source(backend_ctx->context, backend_ctx->device, kernel_src.c_str(), compile_opts);
 
-        CL_CHECK((backend_ctx->kernel_mul_mv_id_mxfp4_f32_flat = clCreateKernel(backend_ctx->program_mul_mv_id_mxfp4_f32_flat, "kernel_mul_mv_id_mxfp4_f32_flat", &err), err));
+        if (backend_ctx->program_mul_mv_id_mxfp4_f32_flat) { CL_CHECK((backend_ctx->kernel_mul_mv_id_mxfp4_f32_flat = clCreateKernel(backend_ctx->program_mul_mv_id_mxfp4_f32_flat, "kernel_mul_mv_id_mxfp4_f32_flat", &err), err)); } else { backend_ctx->kernel_mul_mv_id_mxfp4_f32_flat = nullptr; }
         GGML_LOG_CONT(".");
     }
 
@@ -2747,13 +2770,13 @@ static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx, ggml_cl_ve
         backend_ctx->program_transpose =
             build_program_from_source(backend_ctx->context, backend_ctx->device, kernel_src.c_str(), compile_opts);
 
-        CL_CHECK((backend_ctx->kernel_transpose_32_16 = clCreateKernel(backend_ctx->program_transpose, "kernel_transpose_32_16", &err), err));
-        CL_CHECK((backend_ctx->kernel_transpose_32    = clCreateKernel(backend_ctx->program_transpose, "kernel_transpose_32", &err), err));
-        CL_CHECK((backend_ctx->kernel_transpose_16    = clCreateKernel(backend_ctx->program_transpose, "kernel_transpose_16", &err), err));
-        CL_CHECK((backend_ctx->kernel_transpose_8_buf  = clCreateKernel(backend_ctx->program_transpose, "kernel_transpose_8_buf", &err), err));
-        CL_CHECK((backend_ctx->kernel_transpose_16_buf = clCreateKernel(backend_ctx->program_transpose, "kernel_transpose_16_buf", &err), err));
-        CL_CHECK((backend_ctx->kernel_transpose_32_buf = clCreateKernel(backend_ctx->program_transpose, "kernel_transpose_32_buf", &err), err));
-        CL_CHECK((backend_ctx->kernel_transpose_16_4x1 = clCreateKernel(backend_ctx->program_transpose, "kernel_transpose_16_4x1", &err), err));
+        if (backend_ctx->program_transpose) { CL_CHECK((backend_ctx->kernel_transpose_32_16 = clCreateKernel(backend_ctx->program_transpose, "kernel_transpose_32_16", &err), err)); } else { backend_ctx->kernel_transpose_32_16 = nullptr; }
+        if (backend_ctx->program_transpose) { CL_CHECK((backend_ctx->kernel_transpose_32 = clCreateKernel(backend_ctx->program_transpose, "kernel_transpose_32", &err), err)); } else { backend_ctx->kernel_transpose_32 = nullptr; }
+        if (backend_ctx->program_transpose) { CL_CHECK((backend_ctx->kernel_transpose_16 = clCreateKernel(backend_ctx->program_transpose, "kernel_transpose_16", &err), err)); } else { backend_ctx->kernel_transpose_16 = nullptr; }
+        if (backend_ctx->program_transpose) { CL_CHECK((backend_ctx->kernel_transpose_8_buf = clCreateKernel(backend_ctx->program_transpose, "kernel_transpose_8_buf", &err), err)); } else { backend_ctx->kernel_transpose_8_buf = nullptr; }
+        if (backend_ctx->program_transpose) { CL_CHECK((backend_ctx->kernel_transpose_16_buf = clCreateKernel(backend_ctx->program_transpose, "kernel_transpose_16_buf", &err), err)); } else { backend_ctx->kernel_transpose_16_buf = nullptr; }
+        if (backend_ctx->program_transpose) { CL_CHECK((backend_ctx->kernel_transpose_32_buf = clCreateKernel(backend_ctx->program_transpose, "kernel_transpose_32_buf", &err), err)); } else { backend_ctx->kernel_transpose_32_buf = nullptr; }
+        if (backend_ctx->program_transpose) { CL_CHECK((backend_ctx->kernel_transpose_16_4x1 = clCreateKernel(backend_ctx->program_transpose, "kernel_transpose_16_4x1", &err), err)); } else { backend_ctx->kernel_transpose_16_4x1 = nullptr; }
         GGML_LOG_CONT(".");
     }
 
@@ -2882,7 +2905,7 @@ static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx, ggml_cl_ve
         const std::string kernel_src = read_file("gemm_noshuffle_q4_1_f32.cl");
 #endif
         cl_program prog = build_program_from_source(backend_ctx->context, backend_ctx->device, kernel_src.c_str(), compile_opts);
-        CL_CHECK((backend_ctx->kernel_gemm_noshuffle_q4_1_f32 = clCreateKernel(prog, "kernel_gemm_noshuffle_q4_1_f32", &err), err));
+        if (prog) { CL_CHECK((backend_ctx->kernel_gemm_noshuffle_q4_1_f32 = clCreateKernel(prog, "kernel_gemm_noshuffle_q4_1_f32", &err), err)); } else { backend_ctx->kernel_gemm_noshuffle_q4_1_f32 = nullptr; }
         CL_CHECK(clReleaseProgram(prog));
         GGML_LOG_CONT(".");
     }
@@ -2906,7 +2929,7 @@ static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx, ggml_cl_ve
         cl_program prog = build_program_from_source(
             backend_ctx->context, backend_ctx->device, kernel_src.c_str(), CL_gemv_compile_opts);
 
-        CL_CHECK((backend_ctx->kernel_gemv_noshuffle_q4_1_f32 = clCreateKernel(prog, "kernel_gemv_noshuffle_q4_1_f32", &err), err));
+        if (prog) { CL_CHECK((backend_ctx->kernel_gemv_noshuffle_q4_1_f32 = clCreateKernel(prog, "kernel_gemv_noshuffle_q4_1_f32", &err), err)); } else { backend_ctx->kernel_gemv_noshuffle_q4_1_f32 = nullptr; }
         CL_CHECK(clReleaseProgram(prog));
         GGML_LOG_CONT(".");
     }
@@ -2921,7 +2944,7 @@ static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx, ggml_cl_ve
         const std::string kernel_src_q8_8x4_gemm = read_file("mul_mm_q8_0_f32_8x4.cl");
 #endif
         backend_ctx->program_CL_gemm = build_program_from_source(backend_ctx->context, backend_ctx->device, kernel_src_q8_8x4_gemm.c_str(), compile_opts);
-        CL_CHECK((backend_ctx->kernel_mul_mm_q8_0_f32_8x4 = clCreateKernel(backend_ctx->program_CL_gemm, "kernel_mul_mm_q8_0_f32_8x4", &err), err));
+        if (backend_ctx->program_CL_gemm) { CL_CHECK((backend_ctx->kernel_mul_mm_q8_0_f32_8x4 = clCreateKernel(backend_ctx->program_CL_gemm, "kernel_mul_mm_q8_0_f32_8x4", &err), err)); } else { backend_ctx->kernel_mul_mm_q8_0_f32_8x4 = nullptr; }
         GGML_LOG_CONT(".");
     }
 
@@ -2946,7 +2969,7 @@ static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx, ggml_cl_ve
         cl_program prog = build_program_from_source(
             backend_ctx->context, backend_ctx->device, kernel_src_CL_gemv_general.c_str(), CL_gemv_compile_opts);
 
-        CL_CHECK((backend_ctx->CL_mul_mat_vec_q8_0_f32 = clCreateKernel(prog, "kernel_gemv_noshuffle_q8_0_f32", &err), err));
+        if (prog) { CL_CHECK((backend_ctx->CL_mul_mat_vec_q8_0_f32 = clCreateKernel(prog, "kernel_gemv_noshuffle_q8_0_f32", &err), err)); } else { backend_ctx->CL_mul_mat_vec_q8_0_f32 = nullptr; }
         CL_CHECK(clReleaseProgram(prog));
         GGML_LOG_CONT(".");
     }
@@ -2961,7 +2984,7 @@ static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx, ggml_cl_ve
         const std::string kernel_src = read_file("gemm_noshuffle_q4_k_f32.cl");
 #endif
         cl_program prog = build_program_from_source(backend_ctx->context, backend_ctx->device, kernel_src.c_str(), compile_opts);
-        CL_CHECK((backend_ctx->kernel_gemm_noshuffle_q4_k_f32 = clCreateKernel(prog, "kernel_gemm_noshuffle_q4_k_f32", &err), err));
+        if (prog) { CL_CHECK((backend_ctx->kernel_gemm_noshuffle_q4_k_f32 = clCreateKernel(prog, "kernel_gemm_noshuffle_q4_k_f32", &err), err)); } else { backend_ctx->kernel_gemm_noshuffle_q4_k_f32 = nullptr; }
         CL_CHECK(clReleaseProgram(prog));
         GGML_LOG_CONT(".");
     }
@@ -2985,7 +3008,7 @@ static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx, ggml_cl_ve
         cl_program prog = build_program_from_source(
             backend_ctx->context, backend_ctx->device, kernel_src.c_str(), CL_gemv_compile_opts);
 
-        CL_CHECK((backend_ctx->kernel_gemv_noshuffle_q4_k_f32 = clCreateKernel(prog, "kernel_gemv_noshuffle_q4_k_f32", &err), err));
+        if (prog) { CL_CHECK((backend_ctx->kernel_gemv_noshuffle_q4_k_f32 = clCreateKernel(prog, "kernel_gemv_noshuffle_q4_k_f32", &err), err)); } else { backend_ctx->kernel_gemv_noshuffle_q4_k_f32 = nullptr; }
         CL_CHECK(clReleaseProgram(prog));
         GGML_LOG_CONT(".");
     }
@@ -3006,7 +3029,7 @@ static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx, ggml_cl_ve
         backend_ctx->program_gemv_moe_mxfp4_f32 =
             build_program_from_source(backend_ctx->context, backend_ctx->device, kernel_src.c_str(), CL_moe_compile_opts);
 
-        CL_CHECK((backend_ctx->kernel_gemv_moe_mxfp4_f32 = clCreateKernel(backend_ctx->program_gemv_moe_mxfp4_f32, "kernel_gemv_moe_mxfp4_f32", &err), err));
+        if (backend_ctx->program_gemv_moe_mxfp4_f32) { CL_CHECK((backend_ctx->kernel_gemv_moe_mxfp4_f32 = clCreateKernel(backend_ctx->program_gemv_moe_mxfp4_f32, "kernel_gemv_moe_mxfp4_f32", &err), err)); } else { backend_ctx->kernel_gemv_moe_mxfp4_f32 = nullptr; }
         GGML_LOG_CONT(".");
     }
 
@@ -3022,7 +3045,7 @@ static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx, ggml_cl_ve
         backend_ctx->program_gemm_moe_mxfp4_f32 =
             build_program_from_source(backend_ctx->context, backend_ctx->device, kernel_src.c_str(), CL_moe_compile_opts);
 
-        CL_CHECK((backend_ctx->kernel_gemm_moe_mxfp4_f32 = clCreateKernel(backend_ctx->program_gemm_moe_mxfp4_f32, "kernel_gemm_moe_mxfp4_f32", &err), err));
+        if (backend_ctx->program_gemm_moe_mxfp4_f32) { CL_CHECK((backend_ctx->kernel_gemm_moe_mxfp4_f32 = clCreateKernel(backend_ctx->program_gemm_moe_mxfp4_f32, "kernel_gemm_moe_mxfp4_f32", &err), err)); } else { backend_ctx->kernel_gemm_moe_mxfp4_f32 = nullptr; }
         GGML_LOG_CONT(".");
     }
 
@@ -3045,7 +3068,7 @@ static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx, ggml_cl_ve
         cl_program prog =
             build_program_from_source(backend_ctx->context, backend_ctx->device, kernel_src.c_str(), CL_gemv_compile_opts);
 
-        CL_CHECK((backend_ctx->kernel_gemv_noshuffle_q6_K_f32 = clCreateKernel(prog, "kernel_gemv_noshuffle_q6_K_f32", &err), err));
+        if (prog) { CL_CHECK((backend_ctx->kernel_gemv_noshuffle_q6_K_f32 = clCreateKernel(prog, "kernel_gemv_noshuffle_q6_K_f32", &err), err)); } else { backend_ctx->kernel_gemv_noshuffle_q6_K_f32 = nullptr; }
         GGML_LOG_CONT(".");
     }
 
@@ -3061,11 +3084,13 @@ static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx, ggml_cl_ve
         cl_program prog =
             build_program_from_source(backend_ctx->context, backend_ctx->device, kernel_src.c_str(), CL_moe_compile_opts);
 
-        CL_CHECK((backend_ctx->kernel_gemm_noshuffle_q6_K_f32 = clCreateKernel(prog, "kernel_gemm_noshuffle_q6_K_f32", &err), err));
+        if (prog) { CL_CHECK((backend_ctx->kernel_gemm_noshuffle_q6_K_f32 = clCreateKernel(prog, "kernel_gemm_noshuffle_q6_K_f32", &err), err)); } else { backend_ctx->kernel_gemm_noshuffle_q6_K_f32 = nullptr; }
         GGML_LOG_CONT(".");
     }
 #endif // GGML_OPENCL_USE_ADRENO_KERNELS
     GGML_LOG_CONT("\n");
+
+    g_ggml_opencl_relaxed_program_build = prev_relaxed;
 }
 
 // XXX static ggml_backend_opencl_context * ggml_cl2_init(ggml_backend_dev_t dev) {
@@ -3546,15 +3571,20 @@ static ggml_backend_opencl_context * ggml_cl2_init(ggml_backend_dev_t dev) {
 #ifdef GGML_OPENCL_USE_CLBLAST
         GGML_LOG_INFO("ggml_opencl: enabling legacy NVIDIA / CLBlast compatibility path\n");
         load_clblast_compat_kernels(backend_ctx.get());
+        {
+            const clblast::StatusCode fc = clblast::FillCache(backend_ctx->device);
+            if (fc != clblast::StatusCode::kSuccess) {
+                GGML_LOG_INFO("ggml_opencl: CLBlast FillCache returned %d (continuing)\n", (int) fc);
+            }
+        }
         load_cl_set_rows_kernels(backend_ctx.get(), "-cl-std=CL1.2 -cl-mad-enable -cl-unsafe-math-optimizations -cl-finite-math-only -cl-fast-relaxed-math");
         load_legacy_core_kernels(backend_ctx.get(), "-cl-std=CL1.2 -cl-mad-enable -cl-unsafe-math-optimizations -cl-finite-math-only -cl-fast-relaxed-math");
 #else
         GGML_LOG_ERROR("ggml_opencl: legacy NVIDIA mode requires GGML_OPENCL_USE_CLBLAST\n");
         return nullptr;
 #endif
-    } else {
-        load_cl_kernels(backend_ctx.get(), opencl_c_version);
     }
+    load_cl_kernels(backend_ctx.get(), opencl_c_version);
 
 #ifdef GGML_OPENCL_USE_ADRENO_KERNELS
     // Allocate intermediate buffers and images
@@ -4552,93 +4582,9 @@ static ggml_status ggml_backend_opencl_graph_compute(ggml_backend_t backend, ggm
     return GGML_STATUS_SUCCESS;
 }
 
-static bool ggml_opencl_supports_op(ggml_backend_dev_t dev, const struct ggml_tensor * op) {
+static bool ggml_opencl_supports_op_standard(ggml_backend_dev_t dev, const struct ggml_tensor * op) {
     ggml_backend_opencl_device_context * dev_ctx     = (ggml_backend_opencl_device_context *)dev->context;
     ggml_backend_opencl_context *        backend_ctx = dev_ctx->backend_ctx;
-
-    if (ggml_opencl_use_legacy_nvidia(backend_ctx)) {
-#ifdef GGML_OPENCL_USE_CLBLAST
-        switch (op->op) {
-            case GGML_OP_NONE:
-            case GGML_OP_RESHAPE:
-            case GGML_OP_VIEW:
-            case GGML_OP_PERMUTE:
-            case GGML_OP_TRANSPOSE:
-                return true;
-            case GGML_OP_MUL_MAT:
-                return ggml_opencl_can_mul_mat_legacy(backend_ctx, op->src[0], op->src[1], op);
-            case GGML_OP_SET_ROWS:
-                if (op->src[0]->type != GGML_TYPE_F32) {
-                    return false;
-                }
-                switch (op->type) {
-                    case GGML_TYPE_F16:
-                        return backend_ctx->fp16_support &&
-                               (op->src[1]->type == GGML_TYPE_I64 || op->src[1]->type == GGML_TYPE_I32);
-                    case GGML_TYPE_F32:
-                        return op->src[1]->type == GGML_TYPE_I64 || op->src[1]->type == GGML_TYPE_I32;
-                    default:
-                        return false;
-                }
-            case GGML_OP_DIAG_MASK_INF:
-                return op->src[0] && op->src[0]->type == GGML_TYPE_F32 && op->type == GGML_TYPE_F32 &&
-                       ggml_is_contiguous(op->src[0]) && ggml_is_contiguous(op);
-            case GGML_OP_RMS_NORM:
-                return op->src[0] && op->src[0]->type == GGML_TYPE_F32 && op->type == GGML_TYPE_F32 &&
-                       ggml_is_contiguous(op->src[0]) && ggml_is_contiguous(op);
-            case GGML_OP_ADD:
-            case GGML_OP_MUL:
-                return ggml_opencl_legacy_same_shape_elementwise(op) &&
-                       ggml_opencl_legacy_contiguous_f32(op->src[0]) &&
-                       ggml_opencl_legacy_contiguous_f32(op->src[1]) &&
-                       op->type == GGML_TYPE_F32 && ggml_is_contiguous(op);
-            case GGML_OP_SCALE:
-                return op->src[0] && op->src[0]->type == GGML_TYPE_F32 && op->type == GGML_TYPE_F32 &&
-                       ggml_is_contiguous(op->src[0]) && ggml_is_contiguous(op);
-            case GGML_OP_CPY:
-                return op->src[0] && op->src[1] &&
-                       op->src[0]->type == GGML_TYPE_F32 && op->src[1]->type == GGML_TYPE_F32 &&
-                       ggml_are_same_shape(op->src[0], op->src[1]) &&
-                       ggml_is_contiguous(op->src[0]) && ggml_is_contiguous(op->src[1]);
-            case GGML_OP_DUP:
-            case GGML_OP_CONT:
-                return op->src[0] && op->src[0]->type == GGML_TYPE_F32 && op->type == GGML_TYPE_F32 &&
-                       ggml_are_same_shape(op->src[0], op) &&
-                       ggml_is_contiguous(op->src[0]) && ggml_is_contiguous(op);
-            case GGML_OP_UNARY:
-                switch (ggml_get_unary_op(op)) {
-                    case GGML_UNARY_OP_SILU:
-                    case GGML_UNARY_OP_GELU:
-                        return op->src[0] && ggml_opencl_legacy_contiguous_f32(op->src[0]) &&
-                               op->type == GGML_TYPE_F32 && ggml_is_contiguous(op);
-                    default:
-                        return false;
-                }
-            case GGML_OP_SOFT_MAX:
-                return op->src[0] && op->src[0]->type == GGML_TYPE_F32 && op->type == GGML_TYPE_F32 &&
-                       (!op->src[1] || op->src[1]->type == GGML_TYPE_F32);
-            case GGML_OP_ROPE: {
-                if (!op->src[0] || op->src[0]->type != GGML_TYPE_F32 || op->type != GGML_TYPE_F32) {
-                    return false;
-                }
-                const int mode = ((const int *) op->op_params)[2];
-                if (mode & GGML_ROPE_TYPE_MROPE) {
-                    return false;
-                }
-                if (mode == GGML_ROPE_TYPE_VISION || mode == GGML_ROPE_TYPE_IMROPE) {
-                    return false;
-                }
-                return true;
-            }
-            default:
-                ggml_opencl_legacy_op_inventory_log(op);
-                return false;
-        }
-#else
-        return false;
-#endif
-    }
-
     switch (op->op) {
         case GGML_OP_NONE:
             return true;
@@ -4860,6 +4806,9 @@ static bool ggml_opencl_supports_op(ggml_backend_dev_t dev, const struct ggml_te
             return true;
         case GGML_OP_ARGSORT: {
             cl_kernel kernel = backend_ctx->kernel_argsort_f32_i32;
+            if (kernel == nullptr) {
+                return false;
+            }
             int max_workgroup_size = backend_ctx->get_kernel_workgroup_size(kernel);
 
             int cols = 1;
@@ -4912,6 +4861,38 @@ static bool ggml_opencl_supports_op(ggml_backend_dev_t dev, const struct ggml_te
         default:
             return false;
     }
+}
+
+
+static bool ggml_opencl_supports_op(ggml_backend_dev_t dev, const struct ggml_tensor * op) {
+    ggml_backend_opencl_device_context * dev_ctx     = (ggml_backend_opencl_device_context *)dev->context;
+    ggml_backend_opencl_context *        backend_ctx = dev_ctx->backend_ctx;
+
+    if (ggml_opencl_use_legacy_nvidia(backend_ctx)) {
+#ifdef GGML_OPENCL_USE_CLBLAST
+        switch (op->op) {
+            case GGML_OP_NONE:
+            case GGML_OP_RESHAPE:
+            case GGML_OP_VIEW:
+            case GGML_OP_PERMUTE:
+            case GGML_OP_TRANSPOSE:
+                return true;
+            case GGML_OP_MUL_MAT:
+                return ggml_opencl_can_mul_mat_legacy(backend_ctx, op->src[0], op->src[1], op);
+            default: {
+                const bool ok = ggml_opencl_supports_op_standard(dev, op);
+                if (!ok) {
+                    ggml_opencl_legacy_op_inventory_log(op);
+                }
+                return ok;
+            }
+        }
+#else
+        return false;
+#endif
+    }
+
+    return ggml_opencl_supports_op_standard(dev, op);
 }
 
 // Forward declaration - implementation appears later in the file.
@@ -7321,6 +7302,110 @@ static cl_mem ggml_opencl_legacy_prepare_src0_f32(ggml_backend_t backend, const 
     return backend_ctx->prealloc_src0.buffer;
 }
 
+static bool ggml_opencl_legacy_native_gemm_env(void) {
+    const char * e = getenv("GGML_OPENCL_LEGACY_NATIVE_GEMM");
+    return e && e[0] != '\0' && strcmp(e, "0") != 0;
+}
+
+static void ggml_opencl_legacy_gemm_f32_naive(
+    ggml_backend_opencl_context * backend_ctx,
+    cl_mem buf_a,
+    cl_ulong off_a_elems,
+    cl_mem buf_b,
+    cl_ulong off_b_elems,
+    cl_mem buf_c,
+    cl_ulong off_c_elems,
+    int K,
+    int M,
+    int N,
+    int ldc,
+    const ggml_tensor * profile_tensor
+) {
+    cl_kernel ker = backend_ctx->kernel_legacy_gemm_f32;
+    const cl_ulong offA = off_a_elems * (cl_ulong) sizeof(float);
+    const cl_ulong offB = off_b_elems * (cl_ulong) sizeof(float);
+    const cl_ulong offC = off_c_elems * (cl_ulong) sizeof(float);
+    CL_CHECK(clSetKernelArg(ker, 0, sizeof(cl_mem), &buf_a));
+    CL_CHECK(clSetKernelArg(ker, 1, sizeof(cl_ulong), &offA));
+    CL_CHECK(clSetKernelArg(ker, 2, sizeof(cl_mem), &buf_b));
+    CL_CHECK(clSetKernelArg(ker, 3, sizeof(cl_ulong), &offB));
+    CL_CHECK(clSetKernelArg(ker, 4, sizeof(cl_mem), &buf_c));
+    CL_CHECK(clSetKernelArg(ker, 5, sizeof(cl_ulong), &offC));
+    CL_CHECK(clSetKernelArg(ker, 6, sizeof(cl_int), &K));
+    CL_CHECK(clSetKernelArg(ker, 7, sizeof(cl_int), &M));
+    CL_CHECK(clSetKernelArg(ker, 8, sizeof(cl_int), &N));
+    CL_CHECK(clSetKernelArg(ker, 9, sizeof(cl_int), &ldc));
+    size_t gws[] = { (size_t) M, (size_t) N };
+    backend_ctx->enqueue_ndrange_kernel(ker, 2, gws, nullptr, profile_tensor);
+}
+
+static void ggml_cl_legacy_get_rows(ggml_backend_t backend, const ggml_tensor * src0, const ggml_tensor * src1, ggml_tensor * dst) {
+    GGML_ASSERT(src0 && src0->extra && src1 && src1->extra && dst && dst->extra);
+
+    GGML_TENSOR_LOCALS(int,      ne0, src0, ne);
+    GGML_TENSOR_LOCALS(cl_ulong, nb0, src0, nb);
+    GGML_TENSOR_LOCALS(int,      ne1, src1, ne);
+    GGML_TENSOR_LOCALS(cl_ulong, nb1, src1, nb);
+    GGML_TENSOR_LOCALS(int,      ne,  dst,  ne);
+    GGML_TENSOR_LOCALS(cl_ulong, nb,  dst,  nb);
+
+    ggml_backend_opencl_context * backend_ctx = (ggml_backend_opencl_context *) backend->context;
+
+    ggml_tensor_extra_cl * extra0 = (ggml_tensor_extra_cl *) src0->extra;
+    ggml_tensor_extra_cl * extra1 = (ggml_tensor_extra_cl *) src1->extra;
+    ggml_tensor_extra_cl * extrad = (ggml_tensor_extra_cl *) dst->extra;
+
+    cl_ulong offset0 = extra0->offset + src0->view_offs;
+    cl_ulong offset1 = extra1->offset + src1->view_offs;
+    cl_ulong offsetd = extrad->offset + dst->view_offs;
+
+    GGML_ASSERT(src1->type == GGML_TYPE_I32);
+
+    cl_kernel kernel = nullptr;
+    switch (src0->type) {
+        case GGML_TYPE_F32:
+            kernel = backend_ctx->kernel_legacy_get_rows_f32;
+            break;
+        case GGML_TYPE_Q4_0:
+            kernel = backend_ctx->kernel_legacy_get_rows_q4_0;
+            break;
+        case GGML_TYPE_Q6_K:
+            kernel = backend_ctx->kernel_legacy_get_rows_q6_k;
+            break;
+        default:
+            GGML_ABORT("ggml_opencl legacy get_rows: unsupported type");
+    }
+
+    CL_CHECK(clSetKernelArg(kernel, 0, sizeof(cl_mem), &extra0->data_device));
+    CL_CHECK(clSetKernelArg(kernel, 1, sizeof(cl_ulong), &offset0));
+    CL_CHECK(clSetKernelArg(kernel, 2, sizeof(cl_mem), &extra1->data_device));
+    CL_CHECK(clSetKernelArg(kernel, 3, sizeof(cl_ulong), &offset1));
+    CL_CHECK(clSetKernelArg(kernel, 4, sizeof(cl_mem), &extrad->data_device));
+    CL_CHECK(clSetKernelArg(kernel, 5, sizeof(cl_ulong), &offsetd));
+    CL_CHECK(clSetKernelArg(kernel, 6, sizeof(int), &ne00));
+    CL_CHECK(clSetKernelArg(kernel, 7, sizeof(cl_ulong), &nb01));
+    CL_CHECK(clSetKernelArg(kernel, 8, sizeof(cl_ulong), &nb02));
+    CL_CHECK(clSetKernelArg(kernel, 9, sizeof(cl_ulong), &nb03));
+    CL_CHECK(clSetKernelArg(kernel, 10, sizeof(int), &ne10));
+    CL_CHECK(clSetKernelArg(kernel, 11, sizeof(cl_ulong), &nb10));
+    CL_CHECK(clSetKernelArg(kernel, 12, sizeof(cl_ulong), &nb11));
+    CL_CHECK(clSetKernelArg(kernel, 13, sizeof(cl_ulong), &nb12));
+    CL_CHECK(clSetKernelArg(kernel, 14, sizeof(cl_ulong), &nb1));
+    CL_CHECK(clSetKernelArg(kernel, 15, sizeof(cl_ulong), &nb2));
+    CL_CHECK(clSetKernelArg(kernel, 16, sizeof(cl_ulong), &nb3));
+
+    int max_workgroup_size = (int) backend_ctx->get_kernel_workgroup_size(kernel);
+    int nth = 1;
+    while (nth < ne00 && 2 * nth <= max_workgroup_size) {
+        nth *= 2;
+    }
+
+    size_t global_work_size[] = { (size_t) ne10 * (size_t) nth, (size_t) ne11, (size_t) ne12 };
+    size_t local_work_size[] = { (size_t) nth, 1, 1 };
+
+    backend_ctx->enqueue_ndrange_kernel(kernel, 3, global_work_size, local_work_size, dst);
+}
+
 static void ggml_cl_mul_mat_legacy_nvidia(ggml_backend_t backend, const ggml_tensor * src0, const ggml_tensor * src1, ggml_tensor * dst) {
     auto * backend_ctx = (ggml_backend_opencl_context *) backend->context;
     const auto * extra0 = (const ggml_tensor_extra_cl *) src0->extra;
@@ -7365,6 +7450,45 @@ static void ggml_cl_mul_mat_legacy_nvidia(ggml_backend_t backend, const ggml_ten
     const size_t src1_base_elem = (size_t)(extra1->offset + src1->view_offs) / sizeof(float);
     const size_t dst_base_elem  = (size_t)(extrad->offset + dst->view_offs) / sizeof(float);
 
+    static bool s_logged_clblast_gemm_fallback = false;
+
+    auto legacy_run_gemm = [&](size_t m_sz, size_t n_sz, size_t k_sz,
+                               cl_mem a_buf, size_t a_off_el, size_t lda_el,
+                               cl_mem b_buf, size_t b_off_el, size_t ldb_el,
+                               cl_mem c_buf, size_t c_off_el, int ldc_el) {
+        if (!ggml_opencl_legacy_native_gemm_env()) {
+            const auto status = clblast::Gemm<float>(
+                clblast::Layout::kColMajor,
+                clblast::Transpose::kYes,
+                clblast::Transpose::kNo,
+                m_sz, n_sz, k_sz,
+                1.0f,
+                a_buf, a_off_el, lda_el,
+                b_buf, b_off_el, ldb_el,
+                0.0f,
+                c_buf, c_off_el, (size_t) ldc_el,
+                &backend_ctx->queue,
+                nullptr);
+            if (status == clblast::StatusCode::kSuccess) {
+                return;
+            }
+            if (!s_logged_clblast_gemm_fallback) {
+                GGML_LOG_WARN(
+                    "ggml_opencl: CLBlast GEMM failed (%d); using native OpenCL FP32 GEMM on GPU (often slower on Kepler). "
+                    "Set GGML_OPENCL_LEGACY_NATIVE_GEMM=1 to skip CLBlast entirely.\n",
+                    (int) status);
+                s_logged_clblast_gemm_fallback = true;
+            }
+        }
+        ggml_opencl_legacy_gemm_f32_naive(
+            backend_ctx,
+            a_buf, (cl_ulong) a_off_el,
+            b_buf, (cl_ulong) b_off_el,
+            c_buf, (cl_ulong) c_off_el,
+            (int) k_sz, (int) m_sz, (int) n_sz, ldc_el,
+            dst);
+    };
+
     if (src0->type == GGML_TYPE_F32 || single_shot_dequant) {
         for (int64_t i03 = 0; i03 < ne03; i03++) {
             for (int64_t i02 = 0; i02 < ne02; i02++) {
@@ -7382,25 +7506,11 @@ static void ggml_cl_mul_mat_legacy_nvidia(ggml_backend_t backend, const ggml_ten
                             + (size_t)(i12 * ne0 * ne1)
                             + (size_t)(i13 * ne2 * ne0 * ne1);
 
-                        const auto status = clblast::Gemm<float>(
-                            clblast::Layout::kColMajor,
-                            clblast::Transpose::kYes,
-                            clblast::Transpose::kNo,
+                        legacy_run_gemm(
                             m_full, n, k,
-                            1.0f,
-                            src0_f32_buf,        src0_slice, (size_t) ne00,
+                            src0_f32_buf, src0_slice, (size_t) ne00,
                             extra1->data_device, src1_slice, (size_t) ne10,
-                            0.0f,
-                            extrad->data_device, dst_slice, (size_t) ne0,
-                            &backend_ctx->queue,
-                            nullptr);
-
-                        if (status != clblast::StatusCode::kSuccess) {
-                            GGML_LOG_ERROR("ggml_opencl: CLBlast GEMM failed (%d) for slice [%lld,%lld,%lld,%lld]\n",
-                                           (int) status, (long long) i02, (long long) i03,
-                                           (long long) i12, (long long) i13);
-                            GGML_ASSERT(false);
-                        }
+                            extrad->data_device, dst_slice, (int) ne0);
                     }
                 }
             }
@@ -7430,26 +7540,11 @@ static void ggml_cl_mul_mat_legacy_nvidia(ggml_backend_t backend, const ggml_ten
                                 + (size_t)(i13 * ne2 * ne0 * ne1)
                                 + (size_t) col0;
 
-                            const auto status = clblast::Gemm<float>(
-                                clblast::Layout::kColMajor,
-                                clblast::Transpose::kYes,
-                                clblast::Transpose::kNo,
+                            legacy_run_gemm(
                                 (size_t) dc, n, k,
-                                1.0f,
                                 backend_ctx->prealloc_src0.buffer, 0, (size_t) ne00,
                                 extra1->data_device, src1_slice, (size_t) ne10,
-                                0.0f,
-                                extrad->data_device, dst_slice, (size_t) ne0,
-                                &backend_ctx->queue,
-                                nullptr);
-
-                            if (status != clblast::StatusCode::kSuccess) {
-                                GGML_LOG_ERROR(
-                                    "ggml_opencl: CLBlast GEMM failed (%d) chunk col %lld dc %lld slice [%lld,%lld,%lld,%lld]\n",
-                                    (int) status, (long long) col0, (long long) dc,
-                                    (long long) i02, (long long) i03, (long long) i12, (long long) i13);
-                                GGML_ASSERT(false);
-                            }
+                                extrad->data_device, dst_slice, (int) ne0);
                         }
                     }
                     col0 += dc;
@@ -14452,82 +14547,14 @@ bool ggml_cl_compute_forward(ggml_backend_t backend, struct ggml_tensor * tensor
                 }
                 ggml_cl_mul_mat_legacy_nvidia(backend, src0, src1, tensor);
                 return true;
-            case GGML_OP_SET_ROWS:
-                if (!any_on_device) {
-                    return false;
-                }
-                ggml_cl_set_rows(backend, src0, src1, tensor);
-                return true;
             case GGML_OP_RESHAPE:
             case GGML_OP_VIEW:
             case GGML_OP_PERMUTE:
             case GGML_OP_TRANSPOSE:
             case GGML_OP_NONE:
                 return true;
-            case GGML_OP_DIAG_MASK_INF:
-                if (!any_on_device) {
-                    return false;
-                }
-                ggml_cl_legacy_diag_mask_inf(backend, src0, src1, tensor);
-                return true;
-            case GGML_OP_RMS_NORM:
-                if (!any_on_device) {
-                    return false;
-                }
-                ggml_cl_legacy_rms_norm(backend, src0, src1, tensor);
-                return true;
-            case GGML_OP_ADD:
-                if (!any_on_device) {
-                    return false;
-                }
-                ggml_cl_legacy_add(backend, src0, src1, tensor);
-                return true;
-            case GGML_OP_MUL:
-                if (!any_on_device) {
-                    return false;
-                }
-                ggml_cl_legacy_mul(backend, src0, src1, tensor);
-                return true;
-            case GGML_OP_SCALE:
-                if (!any_on_device) {
-                    return false;
-                }
-                ggml_cl_legacy_scale(backend, src0, src1, tensor);
-                return true;
-            case GGML_OP_CPY:
-                if (!any_on_device || src1 == nullptr) {
-                    return false;
-                }
-                ggml_cl_legacy_cpy_f32(backend, src0, nullptr, src1);
-                return true;
-            case GGML_OP_DUP:
-            case GGML_OP_CONT:
-                if (!any_on_device) {
-                    return false;
-                }
-                ggml_cl_legacy_cpy_f32(backend, src0, nullptr, tensor);
-                return true;
-            case GGML_OP_UNARY:
-                if (!any_on_device) {
-                    return false;
-                }
-                ggml_cl_legacy_unary(backend, tensor);
-                return true;
-            case GGML_OP_SOFT_MAX:
-                if (!any_on_device) {
-                    return false;
-                }
-                ggml_cl_legacy_soft_max(backend, src0, src1, tensor);
-                return true;
-            case GGML_OP_ROPE:
-                if (!any_on_device) {
-                    return false;
-                }
-                ggml_cl_legacy_rope(backend, src0, src1, tensor);
-                return true;
             default:
-                GGML_UNUSED(any_on_device);
-                return false;
+                break;
         }
 #else
         GGML_UNUSED(any_on_device);
