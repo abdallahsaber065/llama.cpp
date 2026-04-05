@@ -40,8 +40,10 @@ else ()
 endif ()
 
 # Kepler path: OpenCL 1.2 host API, legacy NVIDIA tensor path, embedded kernels from upstream ggml-opencl/kernels.
-# Intentionally no GGML_OPENCL_SOA_Q (packed Q4_0 SoA) and no Adreno-specific defines.
+# GGML_OPENCL_SOA_Q matches stock ggml-opencl (CMakeLists there always defines it): quantized weights use split q/d (etc.) buffers
+# required by mul_mm_q*_l4_lm and related dispatch; without it, C++ references extra0_q4_0 and friends that are only declared under SOA_Q.
 target_compile_definitions(${TARGET_NAME} PRIVATE
+    GGML_OPENCL_SOA_Q
     GGML_OPENCL_USE_CLBLAST
     GGML_OPENCL_LEGACY_NVIDIA
     GGML_OPENCL_TARGET_VERSION=120

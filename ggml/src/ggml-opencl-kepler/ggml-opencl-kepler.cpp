@@ -3443,7 +3443,14 @@ static ggml_backend_opencl_kepler_context * ggml_cl2_init(ggml_backend_dev_t dev
     } else if (is_intel) {
         backend_ctx->gpu_family = GPU_FAMILY::INTEL;
     } else if (is_nvidia) {
+#ifdef GGML_OPENCL_KEPLER_BUILD
+        // Quadro / GeForce are not Adreno; host launch sizing in this file only branches on INTEL vs ADRENO.
+        // Map NVIDIA to INTEL so we use the same workgroup/subgroup size assumptions as the Intel path (kernels still
+        // pick device capabilities when built for this device; failed builds leave null kernels under relaxed legacy init).
+        backend_ctx->gpu_family = GPU_FAMILY::INTEL;
+#else
         backend_ctx->gpu_family = GPU_FAMILY::NVIDIA;
+#endif
 #ifdef GGML_OPENCL_LEGACY_NVIDIA
         backend_ctx->legacy_nvidia = true;
 #endif

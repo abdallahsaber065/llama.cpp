@@ -10,7 +10,7 @@
 - `ggml_opencl_supports_op` — legacy NVIDIA branch: special-cases `MUL_MAT` via `ggml_opencl_can_mul_mat_legacy`, then defers other ops to `ggml_opencl_supports_op_standard`.
 - `ggml_cl_compute_forward` — must implement every op path that `supports_op` can return true for (same file; large switch).
 
-The Kepler backend (`ggml/src/ggml-opencl-kepler/ggml-opencl-kepler.cpp`) is a **fork** of that implementation with a distinct registry GUID/name, NVIDIA-only probe when `GGML_OPENCL_KEPLER_BUILD` is defined, device tag **`[opencl_kepler]`** (plus **`[opencl_legacy_no_fp16]`** when applicable), and **no** `GGML_OPENCL_SOA_Q`.
+The Kepler backend (`ggml/src/ggml-opencl-kepler/ggml-opencl-kepler.cpp`) is a **fork** of that implementation with a distinct registry GUID/name, NVIDIA-only probe when `GGML_OPENCL_KEPLER_BUILD` is defined, device tag **`[opencl_kepler]`** (plus **`[opencl_legacy_no_fp16]`** when applicable), and **`GGML_OPENCL_SOA_Q`** enabled in CMake (same packed SoA quant layout as stock `ggml-opencl`).
 
 ## Checklist by `GGML_OP` (high level)
 
@@ -19,7 +19,7 @@ Use this table as a working backlog; tick rows when Kepler `supports_op` and `gr
 | GGML_OP | Upstream OpenCL (`supports_op_standard` + legacy) | Kepler backend notes |
 |---------|-----------------------------------------------------|----------------------|
 | `NONE`, `RESHAPE`, `VIEW`, `PERMUTE`, `TRANSPOSE` | Yes (legacy branch explicit) | Same |
-| `GET_ROWS` | F32/F16 rows; Q4_0 (unless SOA_Q) | Same; no SOA_Q in Kepler target |
+| `GET_ROWS` | F32/F16 rows; Q4_0 (unless SOA_Q) | Same; Kepler build uses SOA_Q like stock OpenCL |
 | `SET_ROWS` | F32 src0; dst F16/F32; indices I32/I64 | Same |
 | `CPY`, `DUP`, `CONT` | F32/F16/I32 combinations per switch | Same |
 | `SET` | F32/I32 equality constraints | Same |
