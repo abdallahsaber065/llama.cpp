@@ -52,6 +52,8 @@ However, A6x GPUs in phones are likely not supported due to the outdated driver 
 
 This fork also includes a conservative compatibility path for older NVIDIA OpenCL stacks. It is intended for legacy GPUs such as Kepler-class mobile Quadro parts that cannot use the modern CUDA backend.
 
+**Default platform (legacy builds):** If `GGML_OPENCL_PLATFORM` is unset and both Intel and NVIDIA OpenCL ICDs are present, the fork **prefers NVIDIA** so the first enumerated iGPU is not chosen by mistake (Intel OpenCL 1.2 fails the non-legacy OpenCL 2.0 gate and previously resulted in no usable GPU).
+
 This path still loads CLBlast, `set_rows`, and a small **OpenCL 1.2 / FP32 / subgroup-free** program (`legacy_core.cl`) for common transformer ops. It then runs the same **`load_cl_kernels` pass** as the modern backend, compiled for OpenCL C 1.2: programs that fail to build are **skipped** (logged, null program/kernel) instead of aborting the process, so whatever your driver accepts can run on GPU. Scheduling uses the **standard** `supports_op` rules for those ops; `MUL_MAT` remains on the CLBlast + legacy GEMM path when `ggml_opencl_can_mul_mat_legacy` allows it. Anything the driver cannot compile or the backend does not advertise stays on CPU via the scheduler.
 
 **CLBlast scope:** CLBlast provides BLAS-style routines (for example `GEMM`). Custom kernels cover the non-BLAS ops below; other `GGML_OP` types remain unsupported on GPU until implemented.

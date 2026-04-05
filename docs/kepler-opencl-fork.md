@@ -92,6 +92,7 @@ Operational notes:
 
 - GPU layer offload still follows normal `llama.cpp` usage, e.g. `-ngl`.
 - If you need to force OpenCL device selection, use `GGML_OPENCL_PLATFORM` and `GGML_OPENCL_DEVICE`.
+- With `GGML_OPENCL_LEGACY_NVIDIA` builds, when **`GGML_OPENCL_PLATFORM` is unset**, init **prefers the NVIDIA OpenCL platform** if one exists with a GPU (hybrid systems often enumerate Intel first; without this, the iGPU hit the OpenCL 2.0 requirement and the dGPU was never probed).
 - If a graph section is not supported by the legacy OpenCL path, it should fall back to CPU rather than trying to execute an unsafe kernel.
 
 ## When Pulling New Upstream Changes

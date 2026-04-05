@@ -3183,6 +3183,31 @@ static std::vector<ggml_backend_device> ggml_opencl_probe_devices(ggml_backend_r
         }
     }
 
+#ifdef GGML_OPENCL_LEGACY_NVIDIA
+    // Hybrid laptops often register Intel OpenCL before NVIDIA. The first-GPU-wins default then
+    // probes the iGPU (OpenCL C 1.2), hits the OpenCL 2.0 requirement for non-legacy devices,
+    // drops all devices, and the Quadro is never tried unless GGML_OPENCL_PLATFORM is set.
+    // When the user did not request a specific platform, prefer an NVIDIA ICD that exposes a GPU.
+    {
+        const char * plat_env = getenv("GGML_OPENCL_PLATFORM");
+        if (plat_env == nullptr || plat_env[0] == '\0') {
+            for (unsigned i = 0; i < n_platforms; i++) {
+                struct cl_platform * p = &platforms[i];
+                if ((strstr(p->name, "NVIDIA") != nullptr || strstr(p->vendor, "NVIDIA") != nullptr) &&
+                    p->default_device != nullptr) {
+                    default_device          = p->default_device;
+                    default_platform_number = i;
+                    GGML_LOG_INFO(
+                        "ggml_opencl: legacy NVIDIA build: default platform '%s' (NVIDIA preference when "
+                        "GGML_OPENCL_PLATFORM is unset).\n",
+                        p->name);
+                    break;
+                }
+            }
+        }
+    }
+#endif
+
     if (n_devices == 0) {
         GGML_LOG_ERROR("ggml_opencl: could find any OpenCL devices.\n");
         return found_devices;
@@ -3294,7 +3319,7 @@ static std::vector<ggml_backend_device> ggml_opencl_probe_devices(ggml_backend_r
 
         auto dev_ctx = std::unique_ptr<ggml_backend_opencl_device_context>(new ggml_backend_opencl_device_context{
             /*.platform         =*/dev->platform->id,
-            /*.platform_nane    =*/dev->platform->name,
+            /*.platform_name    =*/dev->platform->name,
             /*.device           =*/dev->id,
             /*.device_name      =*/dev->name,
             /*.device_type      =*/dev->type,
